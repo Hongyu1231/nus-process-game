@@ -1,52 +1,124 @@
-// src/app/page.tsx
+// app/page.tsx
 "use client";
 
-import React, { useState, Suspense } from "react";
+import React, { useState, Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowRight, User, GraduationCap } from "lucide-react";
+import { ArrowRight, User, GraduationCap, RefreshCw } from "lucide-react";
+import { db } from "@/lib/firebase";
+import { collection, query, where, getDocs } from "firebase/firestore";
+
+const AVATARS = [
+  "🐶",
+  "🐱",
+  "🐭",
+  "🐹",
+  "🐰",
+  "🦊",
+  "🐻",
+  "🐼",
+  "🐨",
+  "🐯",
+  "🦁",
+  "🐮",
+  "🐷",
+  "🐸",
+  "🐵",
+  "🦄",
+  "🐙",
+  "👾",
+  "🤖",
+  "👻",
+];
 
 function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // --- 获取 URL 参数 (来自老师的二维码) ---
-  // 如果学生是直接输网址进来的，默认给 demo 值
   const levelId = searchParams.get("level") || "mckinsey";
   const sessionId = searchParams.get("session") || "";
   const timeLimit = searchParams.get("time") || "60";
 
   const [nickname, setNickname] = useState("");
+  const [avatar, setAvatar] = useState(AVATARS[0]);
+  const [isChecking, setIsChecking] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
-  const handleJoin = (e: React.FormEvent) => {
+  // 初始化随机头像
+  useEffect(() => {
+    setAvatar(AVATARS[Math.floor(Math.random() * AVATARS.length)]);
+  }, []);
+
+  const changeAvatar = () => {
+    const random = AVATARS[Math.floor(Math.random() * AVATARS.length)];
+    setAvatar(random);
+  };
+
+  const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nickname.trim()) return;
+    setIsChecking(true);
+    setErrorMsg("");
 
-    // --- 跳转逻辑 ---
-    // 将所有参数 (Nickname, Level, Session, Time) 传递给游戏页
-    const targetUrl = `/game?nickname=${encodeURIComponent(
-      nickname
-    )}&level=${levelId}&session=${sessionId}&time=${timeLimit}`;
-    router.push(targetUrl);
+    try {
+      // --- 名字查重逻辑 ---
+      if (sessionId) {
+        const q = query(
+          collection(db, "players"),
+          where("sessionId", "==", sessionId),
+          where("nickname", "==", nickname.trim())
+        );
+        const snapshot = await getDocs(q);
+        if (!snapshot.empty) {
+          setErrorMsg("Name already taken! Please choose another.");
+          setIsChecking(false);
+          return;
+        }
+      }
+
+      // 验证通过，跳转 (带上 Avatar 参数)
+      const targetUrl = `/game?nickname=${encodeURIComponent(
+        nickname.trim()
+      )}&avatar=${encodeURIComponent(
+        avatar
+      )}&level=${levelId}&session=${sessionId}&time=${timeLimit}`;
+      router.push(targetUrl);
+    } catch (err) {
+      console.error("Check failed", err);
+      // 如果查重出错（比如网络问题），暂且放行或提示重试
+      setErrorMsg("Network error. Try again.");
+      setIsChecking(false);
+    }
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-600 via-purple-700 to-fuchsia-800 flex flex-col items-center justify-center p-6">
-      {/* Logo 区域 */}
-      <div className="text-center mb-10 animate-in fade-in zoom-in duration-700">
+      <div className="text-center mb-8 animate-in fade-in zoom-in duration-700">
         <div className="bg-white/10 p-4 rounded-full inline-block mb-4 backdrop-blur-md">
-          <GraduationCap size={60} className="text-white" />
+          <GraduationCap size={50} className="text-white" />
         </div>
-        <h1 className="text-5xl font-black text-white drop-shadow-xl tracking-tighter mb-2">
+        <h1 className="text-4xl font-black text-white drop-shadow-xl tracking-tighter">
           PROCESS<span className="text-green-400">MASTER</span>
         </h1>
-        <p className="text-indigo-200 text-lg font-medium">
-          NUS CDE Class Activity
-        </p>
       </div>
 
-      {/* 登录卡片 */}
-      <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 transform hover:scale-[1.01] transition-transform duration-300">
+      <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-8 transform transition-transform duration-300">
         <form onSubmit={handleJoin} className="flex flex-col gap-6">
+          {/* Avatar Selector */}
+          <div className="flex flex-col items-center gap-2">
+            <div
+              onClick={changeAvatar}
+              className="w-24 h-24 bg-indigo-50 rounded-full flex items-center justify-center text-5xl cursor-pointer hover:bg-indigo-100 hover:scale-110 transition-all border-4 border-indigo-100 select-none relative group"
+            >
+              {avatar}
+              <div className="absolute bottom-0 right-0 bg-indigo-600 rounded-full p-1.5 text-white">
+                <RefreshCw size={14} />
+              </div>
+            </div>
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">
+              Tap to change avatar
+            </span>
+          </div>
+
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-400 uppercase tracking-widest ml-1">
               Nickname
@@ -60,52 +132,43 @@ function LoginContent() {
                 type="text"
                 placeholder="Enter your name..."
                 value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
-                className="w-full pl-12 pr-4 py-4 bg-slate-100 border-2 border-slate-200 rounded-xl text-xl font-bold text-slate-800 focus:outline-none focus:border-indigo-600 focus:bg-white transition-all placeholder:text-slate-300"
+                onChange={(e) => {
+                  setNickname(e.target.value);
+                  setErrorMsg("");
+                }}
+                className={`w-full pl-12 pr-4 py-4 bg-slate-100 border-2 rounded-xl text-xl font-bold text-slate-800 focus:outline-none focus:bg-white transition-all ${
+                  errorMsg
+                    ? "border-red-500 focus:border-red-500"
+                    : "border-slate-200 focus:border-indigo-600"
+                }`}
                 autoFocus
-                maxLength={15}
+                maxLength={12}
               />
             </div>
+            {errorMsg && (
+              <p className="text-red-500 text-sm font-bold pl-1 animate-pulse">
+                {errorMsg}
+              </p>
+            )}
           </div>
 
           <button
             type="submit"
-            disabled={!nickname.trim()}
+            disabled={!nickname.trim() || isChecking}
             className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-black py-4 rounded-xl text-xl shadow-lg shadow-indigo-200 flex items-center justify-center gap-2 transition-all active:scale-95"
           >
-            JOIN GAME <ArrowRight strokeWidth={3} />
+            {isChecking ? "CHECKING..." : "JOIN GAME"}{" "}
+            <ArrowRight strokeWidth={3} />
           </button>
         </form>
-
-        {/* 显示当前的 Session 信息 (可选，方便调试) */}
-        {sessionId && (
-          <div className="mt-6 pt-4 border-t border-slate-100 text-center text-xs text-slate-400">
-            Joining Session:{" "}
-            <span className="font-mono text-slate-600">
-              {sessionId.slice(-4)}
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* 底部版权 */}
-      <div className="mt-12 text-white/30 text-xs font-medium">
-        Developed for NUS Computer Engineering
       </div>
     </div>
   );
 }
 
-// 必须使用 Suspense 包裹，否则构建时会报错
 export default function LoginPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen bg-indigo-600 flex items-center justify-center text-white">
-          Loading...
-        </div>
-      }
-    >
+    <Suspense fallback={<div>Loading...</div>}>
       <LoginContent />
     </Suspense>
   );

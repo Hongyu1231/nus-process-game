@@ -1,7 +1,13 @@
 // app/game/page.tsx
 "use client";
 
-import React, { useState, useEffect, Suspense } from "react";
+import React, {
+  useState,
+  useEffect,
+  Suspense,
+  useRef,
+  useCallback,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import {
   DndContext,
@@ -19,71 +25,109 @@ import {
 } from "@dnd-kit/sortable";
 import { SortableItem } from "@/components/SortableItem";
 import { LEVELS, Step } from "@/data/levels";
-import { Clock, CheckCircle } from "lucide-react"; // 增加 CheckCircle
+import { Clock, Loader2, Eye, CheckCircle, Trophy, Medal } from "lucide-react";
 
 import { db } from "@/lib/firebase";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import {
+  collection,
+  addDoc,
+  serverTimestamp,
+  doc,
+  onSnapshot,
+  query,
+  where,
+  getDocs,
+} from "firebase/firestore";
 
-function GameContent() {
-  const searchParams = useSearchParams();
-
-  const nickname = searchParams.get("nickname") || "Anonymous";
-  const levelParam = searchParams.get("level");
-  const sessionId = searchParams.get("session") || "demo_session"; // 获取场次ID
-  const timeLimitParam = parseInt(searchParams.get("time") || "60"); // 获取时间限制
-
-  const currentLevelId =
-    levelParam && LEVELS[levelParam] ? levelParam : "mckinsey";
-  const correctData = LEVELS[currentLevelId];
-
-  // --- States ---
+// ============================================================================
+// 子组件：ActiveGame (由 key={levelId} 控制生命周期，换关卡时自动销毁重建)
+// ============================================================================
+function ActiveGame({
+  levelId,
+  endTimeMillis,
+  sessionId,
+  nickname,
+  avatar,
+  onForceSubmit,
+}: {
+  levelId: string;
+  endTimeMillis: number;
+  sessionId: string;
+  nickname: string;
+  avatar: string;
+  onForceSubmit: () => void;
+}) {
+  const correctData = LEVELS[levelId];
   const [items, setItems] = useState<Step[]>([]);
   const [hasSubmitted, setHasSubmitted] = useState(false);
-  const [alreadyPlayed, setAlreadyPlayed] = useState(false); // 新增：是否已玩过
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [score, setScore] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(timeLimitParam); // 使用自定义时间
-  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(0);
 
-  // --- 1. 初始化与防重复检查 ---
+  // 初始化题目
   useEffect(() => {
-    // 检查本地存储：是否在这个 session 已经提交过？
-    const storageKey = `process_game_${sessionId}_submitted`;
-    if (localStorage.getItem(storageKey)) {
-      setAlreadyPlayed(true); // 标记为已玩过
-      return;
+    if (correctData) {
+      setItems([...correctData.correctOrder].sort(() => Math.random() - 0.5));
     }
+  }, [correctData]);
 
-    const shuffled = [...correctData.correctOrder].sort(
-      () => Math.random() - 0.5
-    );
-    setItems(shuffled);
-    setTimeLeft(timeLimitParam);
-    setIsTimerRunning(true);
-  }, [correctData, sessionId, timeLimitParam]);
-
-  // --- 2. 计时器 ---
+  // 绝对时间同步倒计时
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isTimerRunning && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
-      }, 1000);
-    } else if (timeLeft === 0) {
-      handleSubmit();
-    }
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const remaining = Math.max(0, Math.ceil((endTimeMillis - now) / 1000));
+      setTimeLeft(remaining);
+      if (remaining <= 0 && !hasSubmitted) {
+        handleSubmit();
+      }
+    }, 200);
     return () => clearInterval(interval);
-  }, [isTimerRunning, timeLeft]);
+  }, [endTimeMillis, hasSubmitted]);
 
+  // 提交逻辑
+  const handleSubmit = async () => {
+    if (hasSubmitted) return;
+    setHasSubmitted(true); // 立即锁定
+
+    // 防止重复提交的 Key
+    const subKey = `sub_${sessionId}_${levelId}`;
+    if (sessionStorage.getItem(subKey)) return;
+    sessionStorage.setItem(subKey, "true");
+
+    let correctCount = 0;
+    items.forEach((item, index) => {
+      if (item.id === correctData.correctOrder[index].id) correctCount++;
+    });
+
+    // 倒计时结束时，timeLeft 为 0；手动提交时，timeLeft > 0
+    const timeBonus =
+      correctCount === correctData.correctOrder.length ? timeLeft * 10 : 0;
+    const finalScore = correctCount * 100 + timeBonus;
+
+    try {
+      await addDoc(collection(db, "scores"), {
+        sessionId,
+        nickname,
+        avatar,
+        levelId,
+        score: finalScore,
+        correctCount,
+        // 记录用时 = 总时间 - 剩余时间
+        timeTaken: Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000)), // 粗略估算，或者传 totalTime 进来
+        timestamp: serverTimestamp(),
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // 拖拽逻辑
   const sensors = useSensors(
     useSensor(MouseSensor),
     useSensor(TouchSensor, {
       activationConstraint: { delay: 250, tolerance: 5 },
     })
   );
-
   function handleDragEnd(event: DragEndEvent) {
-    if (hasSubmitted || alreadyPlayed) return;
+    if (hasSubmitted) return;
     const { active, over } = event;
     if (over && active.id !== over.id) {
       setItems((items) => {
@@ -94,73 +138,15 @@ function GameContent() {
     }
   }
 
-  // --- 3. 提交 ---
-  async function handleSubmit() {
-    if (hasSubmitted || isSubmitting || alreadyPlayed) return;
-    setIsTimerRunning(false);
-    setIsSubmitting(true);
-
-    let correctCount = 0;
-    items.forEach((item, index) => {
-      if (item.id === correctData.correctOrder[index].id) {
-        correctCount += 1;
-      }
-    });
-
-    const timeBonus =
-      correctCount === correctData.correctOrder.length ? timeLeft * 10 : 0;
-    const finalScore = correctCount * 100 + timeBonus;
-
-    setScore(finalScore);
-    setHasSubmitted(true);
-
-    // --- 写入本地存储 (防止刷新重玩) ---
-    const storageKey = `process_game_${sessionId}_submitted`;
-    localStorage.setItem(storageKey, "true");
-
-    // --- 上传 Firebase ---
-    try {
-      await addDoc(collection(db, "scores"), {
-        sessionId: sessionId, // 关键：上传 sessionId
-        nickname: nickname,
-        levelId: currentLevelId,
-        score: finalScore,
-        correctCount: correctCount,
-        timeTaken: timeLimitParam - timeLeft,
-        timestamp: serverTimestamp(),
-      });
-    } catch (e) {
-      console.error("Error", e);
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  const getItemStatus = (item: Step, index: number) => {
-    if (!hasSubmitted) return "normal";
-    return item.id === correctData.correctOrder[index].id ? "correct" : "wrong";
-  };
-
-  // --- 如果已经玩过，显示禁止画面 ---
-  if (alreadyPlayed) {
+  if (!items.length)
     return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white p-6 text-center">
-        <CheckCircle size={80} className="text-green-500 mb-6" />
-        <h1 className="text-3xl font-bold mb-2">You've already played!</h1>
-        <p className="text-slate-400">
-          Please wait for the teacher to start a new round.
-        </p>
+      <div className="min-h-screen bg-indigo-900 flex items-center justify-center text-white">
+        <Loader2 className="animate-spin" /> Loading...
       </div>
     );
-  }
-
-  if (!items.length) return <div className="min-h-screen bg-indigo-600"></div>;
 
   return (
-    // ... UI 代码 (Return 部分) 和之前的一样，不用动 ...
-    // ... 确保使用 timeLeft 变量显示倒计时 ...
     <div className="min-h-screen bg-gradient-to-b from-indigo-600 via-purple-600 to-purple-900 flex flex-col items-center py-8">
-      {/* 顶部信息栏 */}
       <div className="w-full max-w-md px-6 flex justify-between items-center mb-6 text-white">
         <div className="flex items-center gap-2 bg-white/20 px-4 py-2 rounded-full backdrop-blur-sm">
           <Clock
@@ -175,9 +161,8 @@ function GameContent() {
             {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, "0")}
           </span>
         </div>
-        <div className="text-right">
-          <div className="text-xs text-purple-200">Player</div>
-          <div className="font-bold">{nickname}</div>
+        <div className="font-bold flex items-center gap-2">
+          <span className="text-2xl">{avatar}</span> {nickname}
         </div>
       </div>
 
@@ -199,7 +184,13 @@ function GameContent() {
                 content={item.content}
                 isLast={index === items.length - 1}
                 disabled={hasSubmitted}
-                status={getItemStatus(item, index)}
+                status={
+                  hasSubmitted
+                    ? item.id === correctData.correctOrder[index].id
+                      ? "correct"
+                      : "wrong"
+                    : "normal"
+                }
               />
             ))}
           </SortableContext>
@@ -210,27 +201,221 @@ function GameContent() {
         {!hasSubmitted ? (
           <button
             onClick={handleSubmit}
-            disabled={isSubmitting}
-            className="w-full max-w-md bg-green-500 hover:bg-green-600 disabled:bg-slate-400 text-white font-black py-4 rounded-xl text-xl shadow-[0_4px_0_rgb(21,128,61)] active:shadow-none active:translate-y-1 transition-all"
+            className="w-full max-w-md bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-xl text-xl shadow-[0_4px_0_rgb(21,128,61)] active:shadow-none active:translate-y-1 transition-all"
           >
-            {isSubmitting ? "SUBMITTING..." : "SUBMIT"}
+            SUBMIT
           </button>
         ) : (
-          <div className="text-center w-full max-w-md animate-in slide-in-from-bottom duration-500">
-            <h2 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-1">
-              Total Score
-            </h2>
-            <div className="text-5xl font-black text-indigo-600 mb-4">
-              {score}
+          <div className="text-center w-full max-w-md">
+            <div className="flex items-center justify-center gap-2 text-green-600 font-bold text-xl mb-2">
+              <CheckCircle /> Submitted!
             </div>
-            <div className="bg-slate-100 p-3 rounded-lg mb-4 text-slate-500 text-sm">
-              Wait for the teacher to start the next round.
-            </div>
+            <p className="text-slate-500 text-sm">Wait for next round...</p>
           </div>
         )}
       </div>
     </div>
   );
+}
+
+// ============================================================================
+// 主组件：GameContent (负责路由状态和 Session 监听)
+// ============================================================================
+function GameContent() {
+  const searchParams = useSearchParams();
+  const nickname = searchParams.get("nickname") || "Anonymous";
+  const avatar = searchParams.get("avatar") || "👤";
+  const sessionId = searchParams.get("session") || "";
+
+  const [sessionData, setSessionData] = useState<any>(null);
+  const [finalStandings, setFinalStandings] = useState<any[]>([]);
+  const [myRank, setMyRank] = useState(0);
+  const hasJoinedRef = useRef(false);
+
+  // 1. 监听 Session
+  useEffect(() => {
+    if (!sessionId) return;
+    const unsub = onSnapshot(doc(db, "sessions", sessionId), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setSessionData(data);
+      }
+    });
+    return () => unsub();
+  }, [sessionId]);
+
+  // 2. 自动加入
+  useEffect(() => {
+    const reportJoin = async () => {
+      const joinKey = `process_game_${sessionId}_joined`;
+      if (hasJoinedRef.current || sessionStorage.getItem(joinKey)) return;
+      hasJoinedRef.current = true;
+      sessionStorage.setItem(joinKey, "true");
+      try {
+        await addDoc(collection(db, "players"), {
+          sessionId,
+          nickname,
+          avatar,
+          joinedAt: serverTimestamp(),
+        });
+      } catch (e) {}
+    };
+    reportJoin();
+  }, [sessionId, nickname, avatar]);
+
+  // 3. 监听最终排名
+  useEffect(() => {
+    if (sessionData?.status === "final_podium") {
+      const fetchScores = async () => {
+        const q = query(
+          collection(db, "scores"),
+          where("sessionId", "==", sessionId)
+        );
+        const snapshot = await getDocs(q);
+        const totals: Record<string, any> = {};
+        snapshot.forEach((doc) => {
+          const d = doc.data();
+          if (!totals[d.nickname])
+            totals[d.nickname] = {
+              nickname: d.nickname,
+              avatar: d.avatar,
+              totalScore: 0,
+            };
+          totals[d.nickname].totalScore += d.score;
+        });
+        const sorted = Object.values(totals).sort(
+          (a: any, b: any) => b.totalScore - a.totalScore
+        );
+        setFinalStandings(sorted);
+        const myIndex = sorted.findIndex((p: any) => p.nickname === nickname);
+        setMyRank(myIndex + 1);
+      };
+      fetchScores();
+    }
+  }, [sessionData?.status, sessionId, nickname]);
+
+  // === VIEW ROUTER ===
+
+  if (!sessionData)
+    return (
+      <div className="min-h-screen bg-indigo-900 flex items-center justify-center text-white">
+        <Loader2 className="animate-spin mr-2" /> Connecting...
+      </div>
+    );
+
+  // Waiting Room
+  if (sessionData.status === "waiting" || sessionData.status === "setup") {
+    return (
+      <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-6 text-center">
+        <Loader2 size={60} className="animate-spin text-indigo-400 mb-6" />
+        <h1 className="text-3xl font-black mb-2">You are in!</h1>
+        <p className="text-xl text-indigo-200 mb-8">
+          Waiting for teacher to start...
+        </p>
+        <div className="bg-indigo-800 px-8 py-4 rounded-full font-bold text-2xl flex items-center gap-3">
+          <span>{avatar}</span> {nickname}
+        </div>
+      </div>
+    );
+  }
+
+  // Active Game (使用 key 强制重置)
+  if (sessionData.status === "playing") {
+    const currentIndex = sessionData.currentLevelIndex;
+    const currentLevelId = sessionData.playlist?.[currentIndex]?.levelId;
+    const endTime = sessionData.endTime?.toMillis() || Date.now() + 60000; // 防空保护
+
+    if (!currentLevelId)
+      return (
+        <div className="min-h-screen bg-indigo-900 text-white flex items-center justify-center">
+          Loading Level Data...
+        </div>
+      );
+
+    return (
+      <ActiveGame
+        key={`${sessionId}_${currentLevelId}_${currentIndex}`} // 核心！关卡变动时销毁重建
+        levelId={currentLevelId}
+        endTimeMillis={endTime}
+        sessionId={sessionId}
+        nickname={nickname}
+        avatar={avatar}
+        onForceSubmit={() => {}} // 逻辑已内聚
+      />
+    );
+  }
+
+  // Review / Leaderboard (只读模式，不显示正确答案细节，只显示"Look at screen")
+  if (sessionData.status === "review" || sessionData.status === "leaderboard") {
+    return (
+      <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-6 text-center">
+        <Eye size={80} className="text-indigo-400 mb-6 animate-pulse" />
+        <h1 className="text-4xl font-black mb-4">Look at the Screen!</h1>
+        <p className="text-xl text-indigo-200">
+          Checking answers and scores...
+        </p>
+      </div>
+    );
+  }
+
+  // Final Podium
+  if (sessionData.status === "final_podium" || sessionData.status === "ended") {
+    return (
+      <div className="min-h-screen bg-slate-900 flex flex-col items-center text-white p-6">
+        <Trophy size={64} className="text-yellow-400 mb-4 drop-shadow-lg" />
+        <h1 className="text-4xl font-black mb-2">Game Over!</h1>
+        <div className="bg-gradient-to-r from-indigo-600 to-purple-600 p-6 rounded-2xl w-full max-w-md mb-8 text-center shadow-2xl border border-white/10">
+          <div className="text-sm font-bold text-indigo-200 uppercase tracking-widest mb-1">
+            Your Rank
+          </div>
+          <div className="text-6xl font-black text-white mb-2">
+            #{myRank > 0 ? myRank : "-"}
+          </div>
+          <div className="flex justify-center items-center gap-2">
+            <span className="text-2xl">{avatar}</span>
+            <span className="text-xl font-bold">{nickname}</span>
+          </div>
+        </div>
+        <div className="w-full max-w-md bg-slate-800 rounded-xl overflow-hidden flex-1 border border-slate-700">
+          <div className="bg-slate-800 p-3 text-xs font-bold text-slate-500 uppercase border-b border-slate-700">
+            Leaderboard
+          </div>
+          <div className="overflow-y-auto h-full pb-20 custom-scrollbar">
+            {finalStandings.map((p, i) => {
+              const isMe = p.nickname === nickname;
+              return (
+                <div
+                  key={i}
+                  className={`flex items-center px-4 py-3 border-b border-slate-700/50 ${
+                    isMe ? "bg-yellow-500/20" : ""
+                  }`}
+                >
+                  <div
+                    className={`font-bold w-10 text-lg ${
+                      isMe ? "text-yellow-400" : "text-slate-500"
+                    }`}
+                  >
+                    #{i + 1}
+                  </div>
+                  <div className="flex-1 font-bold flex items-center gap-2">
+                    <span>{p.avatar}</span>{" "}
+                    <span className={isMe ? "text-yellow-400" : "text-white"}>
+                      {p.nickname} {isMe && "(You)"}
+                    </span>
+                  </div>
+                  <div className="font-mono font-bold text-slate-400">
+                    {p.totalScore}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return <div>Loading...</div>;
 }
 
 export default function GamePage() {

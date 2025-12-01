@@ -1,247 +1,607 @@
 // app/teacher/page.tsx
+// (代码与上一条回复提供的 Teacher Code 一致，无需再次大规模修改，
+// 只要确保 handleStartLevel 中写入了 endTime 即可)
+
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import QRCode from "react-qr-code";
 import { db } from "@/lib/firebase";
 import {
   collection,
   query,
-  orderBy,
   onSnapshot,
-  limit,
   where,
+  doc,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+  Timestamp,
 } from "firebase/firestore";
-import { Trophy, Users, LayoutList, RefreshCw, Clock } from "lucide-react";
+import {
+  Trophy,
+  Users,
+  Play,
+  Square,
+  ArrowRight,
+  Medal,
+  Plus,
+  Trash2,
+  CheckCircle,
+} from "lucide-react";
 import { LEVELS } from "@/data/levels";
 
-// 为了防止类型报错，这里简单定义一下
+// ... (类型定义)
+type SessionStatus =
+  | "setup"
+  | "waiting"
+  | "playing"
+  | "review"
+  | "leaderboard"
+  | "final_podium";
+type PlaylistItem = { levelId: string; timeLimit: number };
 type ScoreData = {
   id: string;
   nickname: string;
+  avatar: string;
   score: number;
-  timeTaken: number;
-  correctCount: number;
+  levelId: string;
 };
 
 export default function TeacherPage() {
-  const [scores, setScores] = useState<ScoreData[]>([]);
-  const [baseUrl, setBaseUrl] = useState("");
+  const [status, setStatus] = useState<SessionStatus>("setup");
+  const [sessionId, setSessionId] = useState("");
 
-  // --- 新增状态 ---
-  const [selectedLevel, setSelectedLevel] = useState("mckinsey");
-  const [timeLimit, setTimeLimit] = useState(60); // 默认60秒
-  const [sessionId, setSessionId] = useState(""); // 当前场次ID
+  // Playlist
+  const [playlist, setPlaylist] = useState<PlaylistItem[]>([]);
+  const [currentLevelIndex, setCurrentLevelIndex] = useState(0);
+
+  // Temp Inputs
+  const [tempLevelId, setTempLevelId] = useState("mckinsey");
+  const [tempTime, setTempTime] = useState(60);
+
+  // Data
+  const [rawScores, setRawScores] = useState<ScoreData[]>([]);
+  const [players, setPlayers] = useState<any[]>([]);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [timerDisplay, setTimerDisplay] = useState(0);
+  const startTimeRef = useRef<number>(0);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      setBaseUrl(window.location.origin);
-      // 初始化一个 Session ID (用时间戳)
-      setSessionId(Date.now().toString());
-    }
+    if (typeof window !== "undefined") setBaseUrl(window.location.origin);
   }, []);
 
-  // --- 生成新的 Session (重置排行榜) ---
-  const handleReset = () => {
-    if (
-      confirm("Start a new session? This will clear the current leaderboard.")
-    ) {
-      setSessionId(Date.now().toString());
+  const currentLevelConfig = playlist[currentLevelIndex];
+  const currentLevelData = currentLevelConfig
+    ? LEVELS[currentLevelConfig.levelId]
+    : null;
+
+  const submittedCount = useMemo(() => {
+    if (!currentLevelConfig) return 0;
+    return rawScores.filter((s) => s.levelId === currentLevelConfig.levelId)
+      .length;
+  }, [rawScores, currentLevelConfig]);
+
+  const leaderboardData = useMemo(() => {
+    const totals: Record<
+      string,
+      { nickname: string; avatar: string; totalScore: number }
+    > = {};
+    players.forEach((p) => {
+      totals[p.nickname] = {
+        nickname: p.nickname,
+        avatar: p.avatar,
+        totalScore: 0,
+      };
+    });
+    rawScores.forEach((s) => {
+      if (totals[s.nickname]) totals[s.nickname].totalScore += s.score;
+    });
+    return Object.values(totals).sort((a, b) => b.totalScore - a.totalScore);
+  }, [rawScores, players]);
+
+  // --- ACTIONS ---
+  const handleCreateLobby = async () => {
+    if (playlist.length === 0) return alert("Add levels first!");
+    const newSessionId = Date.now().toString();
+    setSessionId(newSessionId);
+    setStatus("waiting");
+    setRawScores([]);
+    setPlayers([]);
+    setCurrentLevelIndex(0);
+    await setDoc(doc(db, "sessions", newSessionId), {
+      playlist,
+      currentLevelIndex: 0,
+      status: "waiting",
+      createdAt: serverTimestamp(),
+    });
+  };
+
+  const handleStartLevel = async () => {
+    const config = playlist[currentLevelIndex];
+    setStatus("playing");
+    startTimeRef.current = Date.now();
+    setTimerDisplay(config.timeLimit);
+
+    // Calculate Absolute End Time
+    const now = new Date();
+    const endTime = new Date(now.getTime() + config.timeLimit * 1000);
+
+    await updateDoc(doc(db, "sessions", sessionId), {
+      status: "playing",
+      currentLevelIndex,
+      startTime: serverTimestamp(),
+      endTime: Timestamp.fromDate(endTime), // Sync source
+    });
+  };
+
+  const handleEndLevel = async () => {
+    setStatus("review");
+    await updateDoc(doc(db, "sessions", sessionId), { status: "review" });
+  };
+
+  const handleShowLeaderboard = async () => {
+    setStatus("leaderboard");
+    await updateDoc(doc(db, "sessions", sessionId), { status: "leaderboard" });
+  };
+
+  const handleNextStep = async () => {
+    if (currentLevelIndex + 1 < playlist.length) {
+      setCurrentLevelIndex((prev) => prev + 1);
+      await updateDoc(doc(db, "sessions", sessionId), {
+        currentLevelIndex: currentLevelIndex + 1,
+      });
+    } else {
+      setStatus("final_podium");
+      await updateDoc(doc(db, "sessions", sessionId), {
+        status: "final_podium",
+      });
     }
   };
 
-  // 生成二维码链接：把 关卡、场次ID、时间限制 全部带过去
-  const joinUrl = `${baseUrl}/?level=${selectedLevel}&session=${sessionId}&time=${timeLimit}`;
+  const handleTerminate = async () => {
+    if (confirm("Terminate?")) {
+      setStatus("setup");
+      setSessionId("");
+      setPlaylist([]);
+    }
+  };
 
+  // Auto Advance
   useEffect(() => {
-    if (!sessionId) return;
+    if (
+      status === "playing" &&
+      players.length > 0 &&
+      submittedCount >= players.length
+    ) {
+      const timeout = setTimeout(() => {
+        handleEndLevel();
+      }, 1500);
+      return () => clearTimeout(timeout);
+    }
+  }, [status, submittedCount, players.length]);
 
-    // --- 关键修改：只查询当前 sessionId 的数据 ---
-    // 这解决了“排行榜不刷新”和“重置排行榜”两个问题
-    const q = query(
-      collection(db, "scores"),
-      where("sessionId", "==", sessionId), // 只看当前场次
-      orderBy("score", "desc"),
-      orderBy("timeTaken", "asc"),
-      limit(50)
-    );
+  // Display Timer
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (status === "playing") {
+      const duration = playlist[currentLevelIndex].timeLimit;
+      interval = setInterval(() => {
+        const now = Date.now();
+        const elapsed = Math.floor((now - startTimeRef.current) / 1000);
+        const remaining = Math.max(0, duration - elapsed);
+        setTimerDisplay(remaining);
+        if (remaining === 0) {
+          clearInterval(interval);
+          handleEndLevel();
+        }
+      }, 200);
+    }
+    return () => clearInterval(interval);
+  }, [status, currentLevelIndex]);
 
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const liveScores: ScoreData[] = [];
-        snapshot.forEach((doc) => {
-          liveScores.push({ id: doc.id, ...doc.data() } as ScoreData);
-        });
-        setScores(liveScores);
-      },
-      (error) => {
-        console.error("Index needed:", error);
-        // 如果控制台再次报错 Index needed，请再次点击链接创建索引
+  // Listeners
+  useEffect(() => {
+    if (status === "setup" || !sessionId) return;
+    const unsub1 = onSnapshot(
+      query(collection(db, "scores"), where("sessionId", "==", sessionId)),
+      (s) => {
+        const list: ScoreData[] = [];
+        s.forEach((d) => list.push({ id: d.id, ...d.data() } as ScoreData));
+        setRawScores(list);
       }
     );
+    const unsub2 = onSnapshot(
+      query(collection(db, "players"), where("sessionId", "==", sessionId)),
+      (s) => {
+        const list: any[] = [];
+        s.forEach((d) => list.push(d.data()));
+        setPlayers(list);
+      }
+    );
+    return () => {
+      unsub1();
+      unsub2();
+    };
+  }, [status, sessionId]);
 
-    return () => unsubscribe();
-  }, [sessionId]); // 只要 sessionId 变了，就重新监听
+  const joinUrl = `${baseUrl}/?session=${sessionId}`;
 
-  return (
-    <div className="min-h-screen bg-slate-900 text-white p-6 flex flex-col h-screen overflow-hidden">
-      {/* 顶部控制栏 */}
-      <div className="flex justify-between items-center mb-6 bg-slate-800 p-4 rounded-2xl border border-slate-700">
-        <div>
-          <h1 className="text-2xl font-black text-indigo-400">
-            ProcessMaster <span className="text-white">Admin</span>
-          </h1>
-        </div>
+  // VIEWS (Keep UI same as previous response, just ensure logic above is correct)
+  // ... (UI Code omitted for brevity, use the full UI code from previous response but with above logic logic) ...
+  // Since I need to provide full code to avoid errors, I will paste the UI block again below:
 
-        <div className="flex items-center gap-6">
-          {/* 1. 关卡选择 */}
-          <div className="flex flex-col">
-            <label className="text-xs text-slate-400 font-bold uppercase mb-1">
-              Level
-            </label>
-            <div className="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded border border-slate-600">
-              <LayoutList size={16} className="text-indigo-400" />
-              <select
-                value={selectedLevel}
-                onChange={(e) => setSelectedLevel(e.target.value)}
-                className="bg-transparent text-white font-bold outline-none cursor-pointer text-sm"
-              >
-                {Object.values(LEVELS).map((level) => (
-                  <option
-                    key={level.id}
-                    value={level.id}
-                    className="text-slate-900"
-                  >
-                    {level.title}
-                  </option>
-                ))}
-                {/* 之后在这里显示自定义关卡 */}
-              </select>
-            </div>
-          </div>
-
-          {/* 2. 时间设置 (问题2) */}
-          <div className="flex flex-col w-24">
-            <label className="text-xs text-slate-400 font-bold uppercase mb-1">
-              Timer (s)
-            </label>
-            <div className="flex items-center gap-2 bg-slate-900 px-3 py-2 rounded border border-slate-600">
-              <Clock size={16} className="text-indigo-400" />
-              <input
-                type="number"
-                value={timeLimit}
-                onChange={(e) => setTimeLimit(Number(e.target.value))}
-                className="bg-transparent text-white font-bold outline-none w-full text-sm"
-              />
-            </div>
-          </div>
-
-          {/* 3. 重置按钮 (问题4) */}
-          <button
-            onClick={handleReset}
-            className="flex flex-col items-center justify-center bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg transition-colors h-full"
-          >
-            <RefreshCw size={20} className="mb-1" />
-            <span className="text-xs font-bold uppercase">New Session</span>
-          </button>
-
-          <div className="h-10 w-px bg-slate-600 mx-2"></div>
-
-          <div className="flex items-center gap-3">
-            <Users className="text-green-400" size={28} />
+  if (status === "setup") {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
+        <h1 className="text-4xl font-black text-indigo-400 mb-8">Game Setup</h1>
+        <div className="flex gap-8 w-full max-w-5xl h-[600px]">
+          <div className="w-1/2 bg-slate-800 p-6 rounded-3xl border border-slate-700 flex flex-col gap-6">
+            <h2 className="text-xl font-bold uppercase tracking-wider text-slate-400">
+              Add to Playlist
+            </h2>
             <div>
-              <div className="text-3xl font-black leading-none">
-                {scores.length}
-              </div>
-              <div className="text-[10px] text-slate-400 uppercase font-bold">
-                Joined
+              <label className="block text-sm font-bold mb-2">
+                Select Level
+              </label>
+              <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto custom-scrollbar">
+                {Object.values(LEVELS).map((l) => (
+                  <button
+                    key={l.id}
+                    onClick={() => setTempLevelId(l.id)}
+                    className={`p-3 rounded-lg border text-left text-sm font-bold ${
+                      tempLevelId === l.id
+                        ? "border-indigo-500 bg-indigo-500/20 text-white"
+                        : "border-slate-600 text-slate-400"
+                    }`}
+                  >
+                    {l.title}
+                  </button>
+                ))}
               </div>
             </div>
+            <div>
+              <label className="block text-sm font-bold mb-2">
+                Time Limit (s)
+              </label>
+              <div className="flex items-center gap-4">
+                <input
+                  type="range"
+                  min="1"
+                  max="300"
+                  step="1"
+                  value={tempTime}
+                  onChange={(e) => setTempTime(Number(e.target.value))}
+                  className="flex-1 accent-indigo-500 h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
+                />
+                <input
+                  type="number"
+                  value={tempTime}
+                  onChange={(e) => setTempTime(Number(e.target.value))}
+                  className="w-20 bg-slate-700 border border-slate-600 rounded p-2 font-mono font-bold text-center"
+                />
+              </div>
+            </div>
+            <button
+              onClick={() =>
+                setPlaylist([
+                  ...playlist,
+                  { levelId: tempLevelId, timeLimit: tempTime },
+                ])
+              }
+              className="mt-auto w-full bg-indigo-600 hover:bg-indigo-700 p-4 rounded-xl font-black flex items-center justify-center gap-2"
+            >
+              <Plus /> ADD TO QUEUE
+            </button>
+          </div>
+          <div className="w-1/2 bg-slate-800 p-6 rounded-3xl border border-slate-700 flex flex-col">
+            <h2 className="text-xl font-bold uppercase tracking-wider text-slate-400 mb-4 flex justify-between">
+              Current Queue <span>{playlist.length} rounds</span>
+            </h2>
+            <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar">
+              {playlist.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="bg-slate-700 p-4 rounded-xl flex justify-between items-center animate-in slide-in-from-right duration-300"
+                >
+                  <div>
+                    <span className="bg-slate-900 text-xs font-bold px-2 py-1 rounded text-slate-400 mr-2">
+                      #{idx + 1}
+                    </span>
+                    <span className="font-bold">
+                      {LEVELS[item.levelId].title}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="font-mono text-sm text-indigo-300">
+                      {item.timeLimit}s
+                    </span>
+                    <button
+                      onClick={() =>
+                        setPlaylist(playlist.filter((_, i) => i !== idx))
+                      }
+                      className="text-red-400 hover:text-red-500"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={handleCreateLobby}
+              disabled={playlist.length === 0}
+              className="mt-4 w-full bg-green-500 hover:bg-green-600 disabled:bg-slate-600 text-white font-black p-4 rounded-xl shadow-lg transition-all"
+            >
+              OPEN LOBBY
+            </button>
           </div>
         </div>
       </div>
+    );
+  }
 
-      <div className="flex gap-6 flex-1 h-full overflow-hidden">
-        {/* 左侧：二维码 */}
-        <div className="w-1/3 bg-white rounded-3xl p-6 flex flex-col items-center justify-center shadow-2xl text-center">
-          <h2 className="text-slate-800 text-lg font-bold mb-4 uppercase tracking-widest">
-            Scan to Join
-          </h2>
-          <div className="bg-slate-900 p-4 rounded-xl mb-4">
-            {baseUrl && (
-              <QRCode
-                value={joinUrl}
-                size={220}
-                bgColor="#0f172a"
-                fgColor="#ffffff"
-              />
-            )}
+  // WAITING
+  if (status === "waiting") {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
+        <h1 className="text-5xl font-black mb-4 tracking-tight">
+          Join Session
+        </h1>
+        <div className="bg-white p-6 rounded-3xl shadow-2xl mb-8 flex flex-col items-center max-w-md w-full">
+          <div className="mb-6 w-full flex justify-center">
+            <QRCode
+              value={joinUrl}
+              size={280}
+              style={{ height: "auto", maxWidth: "100%", width: "100%" }}
+              viewBox={`0 0 256 256`}
+            />
           </div>
-          <div className="bg-slate-100 px-4 py-2 rounded-lg w-full">
-            <div className="text-indigo-600 font-bold text-xs break-all">
+          <div className="w-full bg-slate-100 p-4 rounded-xl border border-slate-200 text-center">
+            <div className="text-slate-400 text-[10px] font-bold uppercase mb-1 tracking-widest">
+              Join via URL
+            </div>
+            <div className="text-indigo-600 font-bold text-sm break-all select-all cursor-pointer">
               {joinUrl}
             </div>
           </div>
-          <p className="mt-4 text-slate-400 text-xs">
-            Current Session:{" "}
-            <span className="font-mono text-slate-600">{sessionId}</span>
-          </p>
         </div>
-
-        {/* 右侧：排行榜 */}
-        <div className="w-2/3 bg-slate-800/50 rounded-3xl border border-slate-700 p-6 flex flex-col backdrop-blur-sm">
-          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
-            <table className="w-full text-left border-collapse">
-              <thead className="text-xs text-slate-500 uppercase tracking-wider sticky top-0 bg-slate-900/90 z-10 backdrop-blur">
-                <tr>
-                  <th className="py-3 px-4 rounded-l-lg">Rank</th>
-                  <th className="py-3 px-4">Nickname</th>
-                  <th className="py-3 px-4 text-center">Correct</th>
-                  <th className="py-3 px-4 text-center">Time</th>
-                  <th className="py-3 px-4 text-right rounded-r-lg">Score</th>
-                </tr>
-              </thead>
-              <tbody className="space-y-2">
-                {scores.map((s, index) => (
-                  <tr
-                    key={s.id}
-                    className="group hover:bg-white/5 border-b border-white/5 transition-colors"
-                  >
-                    <td className="py-3 px-4 font-bold text-lg">
-                      {index === 0
-                        ? "🥇"
-                        : index === 1
-                        ? "🥈"
-                        : index === 2
-                        ? "🥉"
-                        : `#${index + 1}`}
-                    </td>
-                    <td className="py-3 px-4 font-bold text-white">
-                      {s.nickname}
-                    </td>
-                    <td className="py-3 px-4 text-center text-slate-300">
-                      {s.correctCount}
-                    </td>
-                    <td className="py-3 px-4 text-center text-slate-400 font-mono text-sm">
-                      {s.timeTaken}s
-                    </td>
-                    <td className="py-3 px-4 text-right font-black text-2xl text-green-400">
-                      {s.score}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {scores.length === 0 && (
-              <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-50">
-                <Trophy size={48} className="mb-2" />
-                <p>Waiting for players...</p>
-              </div>
-            )}
-          </div>
+        <div className="text-2xl font-bold text-indigo-400 mb-6 bg-slate-800 px-6 py-2 rounded-full border border-slate-700">
+          <Users className="inline mr-2 mb-1" /> {players.length} Players Ready
         </div>
+        <div className="grid grid-cols-4 gap-4 w-full max-w-4xl max-h-60 overflow-y-auto mb-8 custom-scrollbar">
+          {players.map((p, i) => (
+            <div
+              key={i}
+              className="bg-slate-800 p-3 rounded-lg flex items-center gap-3 border border-slate-700 animate-in zoom-in"
+            >
+              <span className="text-2xl">{p.avatar}</span>{" "}
+              <span className="font-bold truncate text-sm">{p.nickname}</span>
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={handleStartLevel}
+          className="px-16 py-6 bg-green-500 hover:bg-green-600 text-white font-black text-3xl rounded-full shadow-[0_6px_0_rgb(21,128,61)] active:translate-y-1 transition-all flex items-center gap-4"
+        >
+          START ROUND 1 <ArrowRight size={40} strokeWidth={4} />
+        </button>
       </div>
-    </div>
-  );
+    );
+  }
+
+  // PLAYING
+  if (status === "playing") {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 relative">
+        <div className="absolute top-6 right-6 bg-slate-800 border border-slate-700 px-6 py-3 rounded-xl flex items-center gap-4 shadow-lg">
+          <div className="text-right">
+            <div className="text-xs font-bold text-slate-500 uppercase">
+              Submitted
+            </div>
+            <div className="text-2xl font-black text-white leading-none">
+              <span className="text-green-400">{submittedCount}</span> /{" "}
+              {players.length}
+            </div>
+          </div>
+          <Users className="text-slate-600" size={32} />
+        </div>
+        <div className="text-xl font-bold text-slate-400 uppercase tracking-widest mb-4 border border-slate-700 px-4 py-1 rounded-full">
+          Round {currentLevelIndex + 1} / {playlist.length}
+        </div>
+        <h1 className="text-6xl font-black mb-16 text-center leading-tight bg-clip-text text-transparent bg-gradient-to-br from-white to-slate-400">
+          {currentLevelData?.title}
+        </h1>
+        <div
+          className={`font-mono text-[12rem] font-black mb-16 leading-none ${
+            timerDisplay < 10 ? "text-red-500 animate-pulse" : "text-white"
+          }`}
+        >
+          {timerDisplay}
+        </div>
+        <button
+          onClick={handleEndLevel}
+          className="bg-red-600 hover:bg-red-700 px-12 py-6 rounded-2xl font-black text-2xl shadow-lg border-b-4 border-red-800 active:border-b-0 active:translate-y-1 transition-all"
+        >
+          STOP & SHOW ANSWER
+        </button>
+      </div>
+    );
+  }
+
+  // REVIEW
+  if (status === "review") {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
+        <h1 className="text-4xl font-black text-green-400 mb-8 uppercase tracking-wider">
+          Correct Order
+        </h1>
+        <div className="flex flex-col gap-3 w-full max-w-lg mb-10 flex-1 overflow-y-auto custom-scrollbar">
+          {currentLevelData?.correctOrder.map((step, idx) => (
+            <div
+              key={step.id}
+              className="bg-slate-800 border-l-4 border-green-500 p-5 rounded-r-xl flex items-center gap-4 shadow-lg animate-in slide-in-from-left"
+              style={{ animationDelay: `${idx * 100}ms` }}
+            >
+              <span className="font-black text-2xl text-slate-500 w-8">
+                {idx + 1}
+              </span>
+              <span className="font-bold text-xl">{step.content}</span>
+              <CheckCircle className="ml-auto text-green-500" size={24} />
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={handleShowLeaderboard}
+          className="bg-indigo-600 hover:bg-indigo-700 px-12 py-6 rounded-2xl font-black text-2xl flex items-center gap-4 shadow-lg active:scale-95 transition-all"
+        >
+          SHOW SCORES <ArrowRight size={32} />
+        </button>
+      </div>
+    );
+  }
+
+  // LEADERBOARD
+  if (status === "leaderboard") {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
+        <h1 className="text-4xl font-black text-yellow-400 mb-2 uppercase tracking-widest">
+          Standings
+        </h1>
+        <p className="text-slate-400 mb-8 font-bold bg-slate-800 px-4 py-1 rounded-full">
+          After Round {currentLevelIndex + 1}
+        </p>
+        <div className="w-full max-w-3xl bg-slate-800 rounded-3xl p-8 mb-8 flex-1 overflow-y-auto custom-scrollbar border border-slate-700 shadow-2xl">
+          <table className="w-full">
+            <thead className="text-left text-slate-500 uppercase text-xs font-bold border-b border-slate-700">
+              <tr>
+                <th className="pb-4 pl-4">Rank</th>
+                <th>Player</th>
+                <th className="text-right pr-4">Total Score</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700/50">
+              {leaderboardData.map((d, i) => (
+                <tr
+                  key={i}
+                  className="text-2xl group hover:bg-white/5 transition-colors"
+                >
+                  <td className="py-4 pl-4 font-bold text-slate-500 w-20">
+                    {i === 0
+                      ? "🥇"
+                      : i === 1
+                      ? "🥈"
+                      : i === 2
+                      ? "🥉"
+                      : `#${i + 1}`}
+                  </td>
+                  <td className="py-4 font-bold flex items-center gap-3 text-white">
+                    <span className="text-3xl">{d.avatar}</span> {d.nickname}
+                  </td>
+                  <td className="py-4 pr-4 font-black text-right text-green-400">
+                    {d.totalScore}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {currentLevelIndex + 1 < playlist.length ? (
+          <button
+            onClick={() => {
+              handleNextStep();
+              handleStartLevel();
+            }}
+            className="bg-green-500 hover:bg-green-600 px-12 py-6 rounded-2xl font-black text-2xl shadow-[0_6px_0_rgb(21,128,61)] active:translate-y-1 flex items-center gap-4 transition-all"
+          >
+            START ROUND {currentLevelIndex + 2} <Play fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            onClick={handleNextStep}
+            className="bg-yellow-500 hover:bg-yellow-600 text-black px-12 py-6 rounded-2xl font-black text-2xl shadow-[0_6px_0_rgb(202,138,4)] active:translate-y-1 transition-all"
+          >
+            FINAL PODIUM
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // PODIUM
+  if (status === "final_podium") {
+    const top3 = leaderboardData.slice(0, 3);
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-slate-900 to-indigo-950 text-white flex flex-col items-center justify-center p-4">
+        <h1 className="text-6xl font-black text-yellow-400 mb-12 drop-shadow-lg uppercase tracking-wider">
+          CHAMPIONS
+        </h1>
+        <div className="flex items-end justify-center gap-4 mb-16 w-full max-w-4xl h-96">
+          {top3[1] && (
+            <div className="w-1/3 flex flex-col items-center animate-in slide-in-from-bottom duration-1000 delay-300">
+              <div className="mb-4 text-center">
+                <div className="text-6xl mb-2">{top3[1].avatar}</div>
+                <div className="text-2xl font-bold">{top3[1].nickname}</div>
+                <div className="text-slate-400 font-mono font-bold">
+                  {top3[1].totalScore} pts
+                </div>
+              </div>
+              <div className="w-full h-48 bg-slate-400 rounded-t-xl flex items-start justify-center pt-4 relative shadow-2xl border-t-4 border-slate-300">
+                <Medal size={60} className="text-slate-200" />
+                <div className="absolute bottom-4 text-6xl font-black text-black/20">
+                  2
+                </div>
+              </div>
+            </div>
+          )}
+          {top3[0] && (
+            <div className="w-1/3 flex flex-col items-center animate-in slide-in-from-bottom duration-1000 z-10">
+              <div className="mb-4 text-center">
+                <div className="text-8xl mb-2 animate-bounce">
+                  {top3[0].avatar}
+                </div>
+                <div className="text-4xl font-black text-yellow-300">
+                  {top3[0].nickname}
+                </div>
+                <div className="text-yellow-100 font-mono text-3xl font-bold">
+                  {top3[0].totalScore} pts
+                </div>
+              </div>
+              <div className="w-full h-80 bg-yellow-400 rounded-t-xl flex items-start justify-center pt-6 relative shadow-[0_0_60px_rgba(250,204,21,0.4)] border-t-4 border-yellow-300">
+                <Trophy size={80} className="text-yellow-100" />
+                <div className="absolute bottom-4 text-8xl font-black text-black/20">
+                  1
+                </div>
+              </div>
+            </div>
+          )}
+          {top3[2] && (
+            <div className="w-1/3 flex flex-col items-center animate-in slide-in-from-bottom duration-1000 delay-500">
+              <div className="mb-4 text-center">
+                <div className="text-6xl mb-2">{top3[2].avatar}</div>
+                <div className="text-2xl font-bold">{top3[2].nickname}</div>
+                <div className="text-slate-400 font-mono font-bold">
+                  {top3[2].totalScore} pts
+                </div>
+              </div>
+              <div className="w-full h-32 bg-amber-700 rounded-t-xl flex items-start justify-center pt-4 relative shadow-2xl border-t-4 border-amber-600">
+                <Medal size={60} className="text-amber-200" />
+                <div className="absolute bottom-4 text-6xl font-black text-black/20">
+                  3
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        <button
+          onClick={handleTerminate}
+          className="bg-slate-800 px-8 py-3 rounded-xl font-bold text-slate-400 hover:text-white border border-slate-700 hover:bg-slate-700 transition-colors"
+        >
+          Start New Session
+        </button>
+      </div>
+    );
+  }
+
+  return <div>Loading...</div>;
 }
