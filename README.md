@@ -13,7 +13,7 @@ Real-time Backend: Powered by Firebase Firestore for instant data syncing betwee
 Tech Stack: Next.js (React), TypeScript, Tailwind CSS, Firebase.
 
 
-#This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
 
