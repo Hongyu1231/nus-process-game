@@ -7,6 +7,7 @@ import React, {
   Suspense,
   useRef,
   useCallback,
+  memo,
 } from "react";
 import { useSearchParams } from "next/navigation";
 import {
@@ -39,28 +40,79 @@ import {
   getDocs,
 } from "firebase/firestore";
 
-// ============================================================================
-// 子组件：ActiveGame (由 key={levelId} 控制生命周期，换关卡时自动销毁重建)
-// ============================================================================
+// --- 1. 独立倒计时组件 ---
+const TimerDisplay = memo(
+  ({
+    endTimeMillis,
+    onTimeUp,
+    isStopped,
+  }: {
+    endTimeMillis: number;
+    onTimeUp: () => void;
+    isStopped: boolean;
+  }) => {
+    const [display, setDisplay] = useState(0);
+    const timeUpTriggered = useRef(false);
+
+    useEffect(() => {
+      if (isStopped) return; // 停止计时
+
+      const calc = () =>
+        Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
+      setDisplay(calc());
+
+      const interval = setInterval(() => {
+        const remaining = calc();
+        setDisplay(remaining);
+        if (remaining <= 0 && !timeUpTriggered.current) {
+          timeUpTriggered.current = true;
+          onTimeUp();
+        }
+      }, 200);
+      return () => clearInterval(interval);
+    }, [endTimeMillis, onTimeUp, isStopped]);
+
+    if (isStopped)
+      return (
+        <span className="font-mono font-bold text-xl text-slate-400">
+          --:--
+        </span>
+      );
+
+    return (
+      <span
+        className={`font-mono font-bold text-xl ${
+          display < 10 ? "text-red-300" : ""
+        }`}
+      >
+        {Math.floor(display / 60)}:{String(display % 60).padStart(2, "0")}
+      </span>
+    );
+  }
+);
+TimerDisplay.displayName = "TimerDisplay";
+
+// --- 2. ActiveGame (做题 + Review 一体化) ---
 function ActiveGame({
   levelId,
   endTimeMillis,
   sessionId,
   nickname,
   avatar,
-  onForceSubmit,
+  roundIndex,
+  isReviewMode, // 新增：由父组件控制是否处于 Review 模式
 }: {
   levelId: string;
   endTimeMillis: number;
   sessionId: string;
   nickname: string;
   avatar: string;
-  onForceSubmit: () => void;
+  roundIndex: number;
+  isReviewMode: boolean;
 }) {
   const correctData = LEVELS[levelId];
   const [items, setItems] = useState<Step[]>([]);
   const [hasSubmitted, setHasSubmitted] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(0);
 
   // 初始化题目
   useEffect(() => {
@@ -69,27 +121,13 @@ function ActiveGame({
     }
   }, [correctData]);
 
-  // 绝对时间同步倒计时
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const remaining = Math.max(0, Math.ceil((endTimeMillis - now) / 1000));
-      setTimeLeft(remaining);
-      if (remaining <= 0 && !hasSubmitted) {
-        handleSubmit();
-      }
-    }, 200);
-    return () => clearInterval(interval);
-  }, [endTimeMillis, hasSubmitted]);
-
   // 提交逻辑
-  const handleSubmit = async () => {
-    if (hasSubmitted) return;
-    setHasSubmitted(true); // 立即锁定
+  const handleSubmit = useCallback(async () => {
+    // 如果是 Review 模式触发的提交，或者用户主动提交
+    setHasSubmitted(true);
 
-    // 防止重复提交的 Key
-    const subKey = `sub_${sessionId}_${levelId}`;
-    if (sessionStorage.getItem(subKey)) return;
+    const subKey = `sub_${sessionId}_round_${roundIndex}`;
+    if (sessionStorage.getItem(subKey)) return; // 防止重复
     sessionStorage.setItem(subKey, "true");
 
     let correctCount = 0;
@@ -97,10 +135,12 @@ function ActiveGame({
       if (item.id === correctData.correctOrder[index].id) correctCount++;
     });
 
-    // 倒计时结束时，timeLeft 为 0；手动提交时，timeLeft > 0
-    const timeBonus =
-      correctCount === correctData.correctOrder.length ? timeLeft * 10 : 0;
-    const finalScore = correctCount * 100 + timeBonus;
+    // 只有在非Review模式下(即在规定时间内提交)才有时间分
+    const isTimeUp = Date.now() > endTimeMillis;
+    const timeTaken = isTimeUp
+      ? 0
+      : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
+    const finalScore = correctCount * 100 + timeTaken * 10;
 
     try {
       await addDoc(collection(db, "scores"), {
@@ -108,26 +148,43 @@ function ActiveGame({
         nickname,
         avatar,
         levelId,
+        roundIndex, // 确保上传正确的轮次
         score: finalScore,
         correctCount,
-        // 记录用时 = 总时间 - 剩余时间
-        timeTaken: Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000)), // 粗略估算，或者传 totalTime 进来
+        timeTaken,
         timestamp: serverTimestamp(),
       });
+      console.log(`Submitted Round ${roundIndex}`);
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [
+    items,
+    correctData,
+    endTimeMillis,
+    sessionId,
+    nickname,
+    avatar,
+    levelId,
+    roundIndex,
+  ]);
 
-  // 拖拽逻辑
+  // 监听 Review 模式：一旦变身 Review，强制提交当前结果（如果还没交）
+  useEffect(() => {
+    if (isReviewMode && !hasSubmitted) {
+      handleSubmit();
+    }
+  }, [isReviewMode, hasSubmitted, handleSubmit]);
+
+  // 拖拽
   const sensors = useSensors(
     useSensor(MouseSensor),
     useSensor(TouchSensor, {
-      activationConstraint: { delay: 250, tolerance: 5 },
+      activationConstraint: { delay: 100, tolerance: 5 },
     })
   );
   function handleDragEnd(event: DragEndEvent) {
-    if (hasSubmitted) return;
+    if (hasSubmitted || isReviewMode) return;
     const { active, over } = event;
     if (over && active.id !== over.id) {
       setItems((items) => {
@@ -138,6 +195,9 @@ function ActiveGame({
     }
   }
 
+  // 锁定状态：已提交 或 Review 模式
+  const isLocked = hasSubmitted || isReviewMode;
+
   if (!items.length)
     return (
       <div className="min-h-screen bg-indigo-900 flex items-center justify-center text-white">
@@ -147,19 +207,15 @@ function ActiveGame({
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-600 via-purple-600 to-purple-900 flex flex-col items-center py-8">
+      {/* Header */}
       <div className="w-full max-w-md px-6 flex justify-between items-center mb-6 text-white">
         <div className="flex items-center gap-2 bg-white/20 px-4 py-2 rounded-full backdrop-blur-sm">
-          <Clock
-            size={20}
-            className={timeLeft < 10 ? "animate-pulse text-red-300" : ""}
+          <Clock size={20} />
+          <TimerDisplay
+            endTimeMillis={endTimeMillis}
+            onTimeUp={handleSubmit}
+            isStopped={isReviewMode}
           />
-          <span
-            className={`font-mono font-bold text-xl ${
-              timeLeft < 10 ? "text-red-300" : ""
-            }`}
-          >
-            {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, "0")}
-          </span>
         </div>
         <div className="font-bold flex items-center gap-2">
           <span className="text-2xl">{avatar}</span> {nickname}
@@ -167,9 +223,10 @@ function ActiveGame({
       </div>
 
       <h1 className="text-2xl font-extrabold mb-2 text-white text-center px-4 drop-shadow-md">
-        {correctData.title}
+        {isReviewMode ? "Review Results" : correctData.title}
       </h1>
 
+      {/* Board */}
       <div className="w-full max-w-md px-6 mb-32">
         <DndContext
           sensors={sensors}
@@ -183,9 +240,10 @@ function ActiveGame({
                 id={item.id}
                 content={item.content}
                 isLast={index === items.length - 1}
-                disabled={hasSubmitted}
+                disabled={isLocked} // 锁住
+                // 如果是 Review 模式，显示红绿颜色；否则显示普通白色
                 status={
-                  hasSubmitted
+                  isReviewMode
                     ? item.id === correctData.correctOrder[index].id
                       ? "correct"
                       : "wrong"
@@ -197,20 +255,29 @@ function ActiveGame({
         </DndContext>
       </div>
 
+      {/* Footer */}
       <div className="fixed bottom-0 w-full bg-white p-4 rounded-t-2xl shadow-2xl flex flex-col items-center z-50">
-        {!hasSubmitted ? (
+        {!hasSubmitted && !isReviewMode ? (
           <button
             onClick={handleSubmit}
-            className="w-full max-w-md bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-xl text-xl shadow-[0_4px_0_rgb(21,128,61)] active:shadow-none active:translate-y-1 transition-all"
+            className="w-full max-w-md bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-xl text-xl shadow-lg active:scale-95 transition-all"
           >
             SUBMIT
           </button>
         ) : (
           <div className="text-center w-full max-w-md">
-            <div className="flex items-center justify-center gap-2 text-green-600 font-bold text-xl mb-2">
-              <CheckCircle /> Submitted!
-            </div>
-            <p className="text-slate-500 text-sm">Wait for next round...</p>
+            {isReviewMode ? (
+              <div className="text-indigo-600 font-bold text-lg animate-pulse flex items-center justify-center gap-2">
+                <Eye /> Check your answers!
+              </div>
+            ) : (
+              <div className="flex items-center justify-center gap-2 text-green-600 font-bold text-xl mb-2">
+                <CheckCircle /> Submitted!
+              </div>
+            )}
+            {!isReviewMode && (
+              <p className="text-slate-500 text-sm">Wait for results...</p>
+            )}
           </div>
         )}
       </div>
@@ -218,9 +285,7 @@ function ActiveGame({
   );
 }
 
-// ============================================================================
-// 主组件：GameContent (负责路由状态和 Session 监听)
-// ============================================================================
+// --- 3. Main Container ---
 function GameContent() {
   const searchParams = useSearchParams();
   const nickname = searchParams.get("nickname") || "Anonymous";
@@ -230,26 +295,21 @@ function GameContent() {
   const [sessionData, setSessionData] = useState<any>(null);
   const [finalStandings, setFinalStandings] = useState<any[]>([]);
   const [myRank, setMyRank] = useState(0);
-  const hasJoinedRef = useRef(false);
 
-  // 1. 监听 Session
+  // Sync Session
   useEffect(() => {
     if (!sessionId) return;
     const unsub = onSnapshot(doc(db, "sessions", sessionId), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setSessionData(data);
-      }
+      if (docSnap.exists()) setSessionData(docSnap.data());
     });
     return () => unsub();
   }, [sessionId]);
 
-  // 2. 自动加入
+  // Sync Join
   useEffect(() => {
     const reportJoin = async () => {
       const joinKey = `process_game_${sessionId}_joined`;
-      if (hasJoinedRef.current || sessionStorage.getItem(joinKey)) return;
-      hasJoinedRef.current = true;
+      if (sessionStorage.getItem(joinKey)) return;
       sessionStorage.setItem(joinKey, "true");
       try {
         await addDoc(collection(db, "players"), {
@@ -263,7 +323,7 @@ function GameContent() {
     reportJoin();
   }, [sessionId, nickname, avatar]);
 
-  // 3. 监听最终排名
+  // Sync Final
   useEffect(() => {
     if (sessionData?.status === "final_podium") {
       const fetchScores = async () => {
@@ -294,8 +354,6 @@ function GameContent() {
     }
   }, [sessionData?.status, sessionId, nickname]);
 
-  // === VIEW ROUTER ===
-
   if (!sessionData)
     return (
       <div className="min-h-screen bg-indigo-900 flex items-center justify-center text-white">
@@ -303,15 +361,12 @@ function GameContent() {
       </div>
     );
 
-  // Waiting Room
   if (sessionData.status === "waiting" || sessionData.status === "setup") {
     return (
       <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-6 text-center">
         <Loader2 size={60} className="animate-spin text-indigo-400 mb-6" />
         <h1 className="text-3xl font-black mb-2">You are in!</h1>
-        <p className="text-xl text-indigo-200 mb-8">
-          Waiting for teacher to start...
-        </p>
+        <p className="text-xl text-indigo-200 mb-8">Waiting for teacher...</p>
         <div className="bg-indigo-800 px-8 py-4 rounded-full font-bold text-2xl flex items-center gap-3">
           <span>{avatar}</span> {nickname}
         </div>
@@ -319,42 +374,39 @@ function GameContent() {
     );
   }
 
-  // Active Game (使用 key 强制重置)
-  if (sessionData.status === "playing") {
+  // --- GAME & REVIEW (Shared Logic) ---
+  // 只要不是 Final 或 Waiting，都渲染 ActiveGame
+  // ActiveGame 内部会根据 isReviewMode 决定是否显示对错
+  if (
+    sessionData.status === "playing" ||
+    sessionData.status === "review" ||
+    sessionData.status === "leaderboard"
+  ) {
     const currentIndex = sessionData.currentLevelIndex;
     const currentLevelId = sessionData.playlist?.[currentIndex]?.levelId;
-    const endTime = sessionData.endTime?.toMillis() || Date.now() + 60000; // 防空保护
+    const endTime = sessionData.endTime?.toMillis() || Date.now() + 60000;
+
+    const isReviewMode =
+      sessionData.status === "review" || sessionData.status === "leaderboard";
 
     if (!currentLevelId)
       return (
         <div className="min-h-screen bg-indigo-900 text-white flex items-center justify-center">
-          Loading Level Data...
+          Loading Level...
         </div>
       );
 
     return (
       <ActiveGame
-        key={`${sessionId}_${currentLevelId}_${currentIndex}`} // 核心！关卡变动时销毁重建
+        key={`${sessionId}_round_${currentIndex}`} // 关键：轮次变了才销毁，Review 模式不销毁！
         levelId={currentLevelId}
         endTimeMillis={endTime}
         sessionId={sessionId}
         nickname={nickname}
         avatar={avatar}
-        onForceSubmit={() => {}} // 逻辑已内聚
+        roundIndex={currentIndex}
+        isReviewMode={isReviewMode} // 传入模式
       />
-    );
-  }
-
-  // Review / Leaderboard (只读模式，不显示正确答案细节，只显示"Look at screen")
-  if (sessionData.status === "review" || sessionData.status === "leaderboard") {
-    return (
-      <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-6 text-center">
-        <Eye size={80} className="text-indigo-400 mb-6 animate-pulse" />
-        <h1 className="text-4xl font-black mb-4">Look at the Screen!</h1>
-        <p className="text-xl text-indigo-200">
-          Checking answers and scores...
-        </p>
-      </div>
     );
   }
 
