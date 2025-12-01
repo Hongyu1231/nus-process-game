@@ -1,4 +1,19 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+### ProcessMaster - Interactive Classroom Tool
+
+An educational web application designed to help students learn engineering process flows (e.g., McKinsey 7-Step, Design Thinking, 8D) through interactive drag-and-drop puzzles.
+
+Key Features:
+
+Student Interface: Mobile-first design with drag-and-drop sorting (dnd-kit), real-time feedback, and time-based scoring.
+
+Teacher Dashboard: Admin panel to generate session QR codes, set timers, switch levels, and view live-updating leaderboards.
+
+Real-time Backend: Powered by Firebase Firestore for instant data syncing between student devices and the main classroom screen.
+
+Tech Stack: Next.js (React), TypeScript, Tailwind CSS, Firebase.
+
+
+#This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
 
