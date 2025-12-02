@@ -95,7 +95,7 @@ TimerDisplay.displayName = "TimerDisplay";
 
 // --- 2. ActiveGame ---
 function ActiveGame({
-  levelId, // 显式接收 levelId
+  levelId,
   levelData,
   endTimeMillis,
   sessionId,
@@ -117,14 +117,24 @@ function ActiveGame({
   const [hasSubmitted, setHasSubmitted] = useState(false);
   const [localScore, setLocalScore] = useState<number | null>(null);
 
-  // Init
+  // FIX: 增加一个 ref 来防止重复初始化导致答案重置
+  const initializedRef = useRef(false);
+
+  // 使用 Ref 追踪最新的 items，防止闭包陷阱
+  const itemsRef = useRef<Step[]>([]);
   useEffect(() => {
-    if (levelData && levelData.correctOrder) {
+    itemsRef.current = items;
+  }, [items]);
+
+  // Init: 只初始化一次！
+  useEffect(() => {
+    if (!initializedRef.current && levelData && levelData.correctOrder) {
       setItems([...levelData.correctOrder].sort(() => Math.random() - 0.5));
+      initializedRef.current = true; // 标记为已初始化
     }
   }, [levelData]);
 
-  // Submit
+  // Submit Logic
   const handleSubmit = useCallback(async () => {
     setHasSubmitted((prev) => {
       if (prev) return true;
@@ -134,18 +144,30 @@ function ActiveGame({
       return true;
     });
 
+    // 使用 ref 获取当前排列，保证准确
+    const currentItems = itemsRef.current;
+    if (!currentItems.length) return;
+
     let correctCount = 0;
-    items.forEach((item, index) => {
-      if (item.id === levelData.correctOrder[index].id) correctCount++;
+    currentItems.forEach((item, index) => {
+      // 安全检查
+      if (
+        levelData.correctOrder[index] &&
+        item.id === levelData.correctOrder[index].id
+      ) {
+        correctCount++;
+      }
     });
 
     const isTimeUp = Date.now() > endTimeMillis;
     const timeTaken = isTimeUp
       ? 0
       : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
-    const finalScore =
-      correctCount * 100 +
-      (correctCount === levelData.correctOrder.length ? timeTaken * 10 : 0);
+
+    // 只有全对才给时间分
+    const timeBonus =
+      correctCount === levelData.correctOrder.length ? timeTaken * 10 : 0;
+    const finalScore = correctCount * 100 + timeBonus;
 
     setLocalScore(finalScore);
 
@@ -154,7 +176,7 @@ function ActiveGame({
         sessionId,
         nickname,
         avatar,
-        levelId, // 使用显式传入的 levelId
+        levelId,
         roundIndex,
         score: finalScore,
         correctCount,
@@ -165,7 +187,6 @@ function ActiveGame({
       console.error(e);
     }
   }, [
-    items,
     levelData,
     levelId,
     endTimeMillis,
@@ -258,7 +279,7 @@ function ActiveGame({
                 disabled={isLocked}
                 status={
                   isReviewMode
-                    ? item.id === levelData.correctOrder[index].id
+                    ? item.id === levelData.correctOrder[index]?.id
                       ? "correct"
                       : "wrong"
                     : "normal"
@@ -411,7 +432,7 @@ function GameContent() {
 
     return (
       <ActiveGame
-        key={`${sessionId}_round_${currentIndex}`}
+        key={`${sessionId}_round_${currentIndex}`} // 轮次变化时强制重置
         levelId={currentLevelId} // 显式传递 ID
         levelData={levelData}
         endTimeMillis={endTime}
