@@ -25,16 +25,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { SortableItem } from "@/components/SortableItem";
-import { LEVELS, Step } from "@/data/levels";
-import {
-  Clock,
-  Loader2,
-  Eye,
-  CheckCircle,
-  Trophy,
-  Medal,
-  Star,
-} from "lucide-react"; // 新增 Star 图标
+import { Clock, Loader2, Eye, CheckCircle, Trophy, Star } from "lucide-react";
 
 import { db } from "@/lib/firebase";
 import {
@@ -47,6 +38,10 @@ import {
   where,
   getDocs,
 } from "firebase/firestore";
+
+// --- 类型定义 ---
+type Step = { id: string; content: string };
+type LevelData = { id?: string; title: string; correctOrder: Step[] };
 
 // --- 1. 独立倒计时组件 ---
 const TimerDisplay = memo(
@@ -64,11 +59,9 @@ const TimerDisplay = memo(
 
     useEffect(() => {
       if (isStopped) return;
-
       const calc = () =>
         Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
       setDisplay(calc());
-
       const interval = setInterval(() => {
         const remaining = calc();
         setDisplay(remaining);
@@ -100,9 +93,10 @@ const TimerDisplay = memo(
 );
 TimerDisplay.displayName = "TimerDisplay";
 
-// --- 2. ActiveGame (核心逻辑) ---
+// --- 2. ActiveGame ---
 function ActiveGame({
-  levelId,
+  levelId, // 显式接收 levelId
+  levelData,
   endTimeMillis,
   sessionId,
   nickname,
@@ -111,6 +105,7 @@ function ActiveGame({
   isReviewMode,
 }: {
   levelId: string;
+  levelData: LevelData;
   endTimeMillis: number;
   sessionId: string;
   nickname: string;
@@ -118,62 +113,48 @@ function ActiveGame({
   roundIndex: number;
   isReviewMode: boolean;
 }) {
-  const correctData = LEVELS[levelId];
   const [items, setItems] = useState<Step[]>([]);
   const [hasSubmitted, setHasSubmitted] = useState(false);
-
-  // 新增：本地记录本轮得分，用于展示
   const [localScore, setLocalScore] = useState<number | null>(null);
 
-  // 初始化题目
+  // Init
   useEffect(() => {
-    if (correctData) {
-      setItems([...correctData.correctOrder].sort(() => Math.random() - 0.5));
+    if (levelData && levelData.correctOrder) {
+      setItems([...levelData.correctOrder].sort(() => Math.random() - 0.5));
     }
-  }, [correctData]);
+  }, [levelData]);
 
-  // 提交逻辑
+  // Submit
   const handleSubmit = useCallback(async () => {
     setHasSubmitted((prev) => {
-      if (prev) return true; // 如果已经提交过，不再重复计算
-
-      // 1. 标记提交
+      if (prev) return true;
       const subKey = `sub_${sessionId}_round_${roundIndex}`;
       if (sessionStorage.getItem(subKey)) return true;
       sessionStorage.setItem(subKey, "true");
-
       return true;
     });
 
-    // 注意：这里我们假设 handleSubmit 被调用时，items 是最新的。
-    // 由于 ActiveGame 会随 roundIndex 销毁重建，这里的 items 状态是干净的。
-
-    // 2. 计算分数
     let correctCount = 0;
     items.forEach((item, index) => {
-      if (item.id === correctData.correctOrder[index].id) correctCount++;
+      if (item.id === levelData.correctOrder[index].id) correctCount++;
     });
 
-    // 时间分逻辑
     const isTimeUp = Date.now() > endTimeMillis;
     const timeTaken = isTimeUp
       ? 0
       : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
-    // 如果全对，给时间分；否则只给基础分
-    const timeBonus =
-      correctCount === correctData.correctOrder.length ? timeTaken * 10 : 0;
-    const finalScore = correctCount * 100 + timeBonus;
+    const finalScore =
+      correctCount * 100 +
+      (correctCount === levelData.correctOrder.length ? timeTaken * 10 : 0);
 
-    // 3. 本地保存分数用于展示
     setLocalScore(finalScore);
 
-    // 4. 上传
     try {
       await addDoc(collection(db, "scores"), {
         sessionId,
         nickname,
         avatar,
-        levelId,
+        levelId, // 使用显式传入的 levelId
         roundIndex,
         score: finalScore,
         correctCount,
@@ -185,23 +166,23 @@ function ActiveGame({
     }
   }, [
     items,
-    correctData,
+    levelData,
+    levelId,
     endTimeMillis,
     sessionId,
     nickname,
     avatar,
-    levelId,
     roundIndex,
   ]);
 
-  // 监听 Review 模式自动提交
+  // Review Auto-Submit
   useEffect(() => {
     if (isReviewMode && !hasSubmitted) {
       handleSubmit();
     }
   }, [isReviewMode, hasSubmitted, handleSubmit]);
 
-  // 拖拽
+  // Drag
   const sensors = useSensors(
     useSensor(MouseSensor),
     useSensor(TouchSensor, {
@@ -231,7 +212,6 @@ function ActiveGame({
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-600 via-purple-600 to-purple-900 flex flex-col items-center py-8">
-      {/* Header */}
       <div className="w-full max-w-md px-6 flex justify-between items-center mb-6 text-white">
         <div className="flex items-center gap-2 bg-white/20 px-4 py-2 rounded-full backdrop-blur-sm">
           <Clock size={20} />
@@ -247,10 +227,9 @@ function ActiveGame({
       </div>
 
       <h1 className="text-2xl font-extrabold mb-2 text-white text-center px-4 drop-shadow-md">
-        {isReviewMode ? "Round Results" : correctData.title}
+        {isReviewMode ? "Round Results" : levelData.title}
       </h1>
 
-      {/* --- 新增：分数展示卡片 (仅在 Review 模式且有分数时显示) --- */}
       {isReviewMode && localScore !== null && (
         <div className="mb-6 bg-white/10 backdrop-blur-md border border-white/20 p-4 rounded-2xl flex flex-col items-center animate-in zoom-in duration-300">
           <div className="text-xs text-indigo-200 font-bold uppercase tracking-widest mb-1">
@@ -263,7 +242,6 @@ function ActiveGame({
         </div>
       )}
 
-      {/* Board */}
       <div className="w-full max-w-md px-6 mb-32">
         <DndContext
           sensors={sensors}
@@ -280,7 +258,7 @@ function ActiveGame({
                 disabled={isLocked}
                 status={
                   isReviewMode
-                    ? item.id === correctData.correctOrder[index].id
+                    ? item.id === levelData.correctOrder[index].id
                       ? "correct"
                       : "wrong"
                     : "normal"
@@ -291,7 +269,6 @@ function ActiveGame({
         </DndContext>
       </div>
 
-      {/* Footer */}
       <div className="fixed bottom-0 w-full bg-white p-4 rounded-t-2xl shadow-2xl flex flex-col items-center z-50">
         {!hasSubmitted && !isReviewMode ? (
           <button
@@ -417,12 +394,15 @@ function GameContent() {
     sessionData.status === "leaderboard"
   ) {
     const currentIndex = sessionData.currentLevelIndex;
-    const currentLevelId = sessionData.playlist?.[currentIndex]?.levelId;
+    // 提取数据
+    const playlistItem = sessionData.playlist?.[currentIndex];
+    const levelData = playlistItem?.levelData;
+    const currentLevelId = playlistItem?.levelId;
     const endTime = sessionData.endTime?.toMillis() || Date.now() + 60000;
     const isReviewMode =
       sessionData.status === "review" || sessionData.status === "leaderboard";
 
-    if (!currentLevelId)
+    if (!levelData)
       return (
         <div className="min-h-screen bg-indigo-900 text-white flex items-center justify-center">
           Loading Level...
@@ -431,8 +411,9 @@ function GameContent() {
 
     return (
       <ActiveGame
-        key={`${sessionId}_round_${currentIndex}`} // Round change = Reset
-        levelId={currentLevelId}
+        key={`${sessionId}_round_${currentIndex}`}
+        levelId={currentLevelId} // 显式传递 ID
+        levelData={levelData}
         endTimeMillis={endTime}
         sessionId={sessionId}
         nickname={nickname}
