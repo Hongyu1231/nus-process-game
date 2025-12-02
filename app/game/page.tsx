@@ -26,7 +26,15 @@ import {
 } from "@dnd-kit/sortable";
 import { SortableItem } from "@/components/SortableItem";
 import { LEVELS, Step } from "@/data/levels";
-import { Clock, Loader2, Eye, CheckCircle, Trophy, Medal } from "lucide-react";
+import {
+  Clock,
+  Loader2,
+  Eye,
+  CheckCircle,
+  Trophy,
+  Medal,
+  Star,
+} from "lucide-react"; // 新增 Star 图标
 
 import { db } from "@/lib/firebase";
 import {
@@ -55,7 +63,7 @@ const TimerDisplay = memo(
     const timeUpTriggered = useRef(false);
 
     useEffect(() => {
-      if (isStopped) return; // 停止计时
+      if (isStopped) return;
 
       const calc = () =>
         Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
@@ -74,7 +82,7 @@ const TimerDisplay = memo(
 
     if (isStopped)
       return (
-        <span className="font-mono font-bold text-xl text-slate-400">
+        <span className="font-mono font-bold text-xl text-slate-300">
           --:--
         </span>
       );
@@ -92,7 +100,7 @@ const TimerDisplay = memo(
 );
 TimerDisplay.displayName = "TimerDisplay";
 
-// --- 2. ActiveGame (做题 + Review 一体化) ---
+// --- 2. ActiveGame (核心逻辑) ---
 function ActiveGame({
   levelId,
   endTimeMillis,
@@ -100,7 +108,7 @@ function ActiveGame({
   nickname,
   avatar,
   roundIndex,
-  isReviewMode, // 新增：由父组件控制是否处于 Review 模式
+  isReviewMode,
 }: {
   levelId: string;
   endTimeMillis: number;
@@ -114,6 +122,9 @@ function ActiveGame({
   const [items, setItems] = useState<Step[]>([]);
   const [hasSubmitted, setHasSubmitted] = useState(false);
 
+  // 新增：本地记录本轮得分，用于展示
+  const [localScore, setLocalScore] = useState<number | null>(null);
+
   // 初始化题目
   useEffect(() => {
     if (correctData) {
@@ -123,38 +134,52 @@ function ActiveGame({
 
   // 提交逻辑
   const handleSubmit = useCallback(async () => {
-    // 如果是 Review 模式触发的提交，或者用户主动提交
-    setHasSubmitted(true);
+    setHasSubmitted((prev) => {
+      if (prev) return true; // 如果已经提交过，不再重复计算
 
-    const subKey = `sub_${sessionId}_round_${roundIndex}`;
-    if (sessionStorage.getItem(subKey)) return; // 防止重复
-    sessionStorage.setItem(subKey, "true");
+      // 1. 标记提交
+      const subKey = `sub_${sessionId}_round_${roundIndex}`;
+      if (sessionStorage.getItem(subKey)) return true;
+      sessionStorage.setItem(subKey, "true");
 
+      return true;
+    });
+
+    // 注意：这里我们假设 handleSubmit 被调用时，items 是最新的。
+    // 由于 ActiveGame 会随 roundIndex 销毁重建，这里的 items 状态是干净的。
+
+    // 2. 计算分数
     let correctCount = 0;
     items.forEach((item, index) => {
       if (item.id === correctData.correctOrder[index].id) correctCount++;
     });
 
-    // 只有在非Review模式下(即在规定时间内提交)才有时间分
+    // 时间分逻辑
     const isTimeUp = Date.now() > endTimeMillis;
     const timeTaken = isTimeUp
       ? 0
       : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
-    const finalScore = correctCount * 100 + timeTaken * 10;
+    // 如果全对，给时间分；否则只给基础分
+    const timeBonus =
+      correctCount === correctData.correctOrder.length ? timeTaken * 10 : 0;
+    const finalScore = correctCount * 100 + timeBonus;
 
+    // 3. 本地保存分数用于展示
+    setLocalScore(finalScore);
+
+    // 4. 上传
     try {
       await addDoc(collection(db, "scores"), {
         sessionId,
         nickname,
         avatar,
         levelId,
-        roundIndex, // 确保上传正确的轮次
+        roundIndex,
         score: finalScore,
         correctCount,
         timeTaken,
         timestamp: serverTimestamp(),
       });
-      console.log(`Submitted Round ${roundIndex}`);
     } catch (e) {
       console.error(e);
     }
@@ -169,7 +194,7 @@ function ActiveGame({
     roundIndex,
   ]);
 
-  // 监听 Review 模式：一旦变身 Review，强制提交当前结果（如果还没交）
+  // 监听 Review 模式自动提交
   useEffect(() => {
     if (isReviewMode && !hasSubmitted) {
       handleSubmit();
@@ -195,7 +220,6 @@ function ActiveGame({
     }
   }
 
-  // 锁定状态：已提交 或 Review 模式
   const isLocked = hasSubmitted || isReviewMode;
 
   if (!items.length)
@@ -223,8 +247,21 @@ function ActiveGame({
       </div>
 
       <h1 className="text-2xl font-extrabold mb-2 text-white text-center px-4 drop-shadow-md">
-        {isReviewMode ? "Review Results" : correctData.title}
+        {isReviewMode ? "Round Results" : correctData.title}
       </h1>
+
+      {/* --- 新增：分数展示卡片 (仅在 Review 模式且有分数时显示) --- */}
+      {isReviewMode && localScore !== null && (
+        <div className="mb-6 bg-white/10 backdrop-blur-md border border-white/20 p-4 rounded-2xl flex flex-col items-center animate-in zoom-in duration-300">
+          <div className="text-xs text-indigo-200 font-bold uppercase tracking-widest mb-1">
+            Your Score
+          </div>
+          <div className="text-5xl font-black text-yellow-400 drop-shadow-sm flex items-center gap-2">
+            {localScore}{" "}
+            <Star fill="currentColor" size={32} className="text-yellow-500" />
+          </div>
+        </div>
+      )}
 
       {/* Board */}
       <div className="w-full max-w-md px-6 mb-32">
@@ -240,8 +277,7 @@ function ActiveGame({
                 id={item.id}
                 content={item.content}
                 isLast={index === items.length - 1}
-                disabled={isLocked} // 锁住
-                // 如果是 Review 模式，显示红绿颜色；否则显示普通白色
+                disabled={isLocked}
                 status={
                   isReviewMode
                     ? item.id === correctData.correctOrder[index].id
@@ -268,7 +304,7 @@ function ActiveGame({
           <div className="text-center w-full max-w-md">
             {isReviewMode ? (
               <div className="text-indigo-600 font-bold text-lg animate-pulse flex items-center justify-center gap-2">
-                <Eye /> Check your answers!
+                <Eye /> Check the big screen!
               </div>
             ) : (
               <div className="flex items-center justify-center gap-2 text-green-600 font-bold text-xl mb-2">
@@ -374,9 +410,7 @@ function GameContent() {
     );
   }
 
-  // --- GAME & REVIEW (Shared Logic) ---
-  // 只要不是 Final 或 Waiting，都渲染 ActiveGame
-  // ActiveGame 内部会根据 isReviewMode 决定是否显示对错
+  // GAME & REVIEW
   if (
     sessionData.status === "playing" ||
     sessionData.status === "review" ||
@@ -385,7 +419,6 @@ function GameContent() {
     const currentIndex = sessionData.currentLevelIndex;
     const currentLevelId = sessionData.playlist?.[currentIndex]?.levelId;
     const endTime = sessionData.endTime?.toMillis() || Date.now() + 60000;
-
     const isReviewMode =
       sessionData.status === "review" || sessionData.status === "leaderboard";
 
@@ -398,19 +431,19 @@ function GameContent() {
 
     return (
       <ActiveGame
-        key={`${sessionId}_round_${currentIndex}`} // 关键：轮次变了才销毁，Review 模式不销毁！
+        key={`${sessionId}_round_${currentIndex}`} // Round change = Reset
         levelId={currentLevelId}
         endTimeMillis={endTime}
         sessionId={sessionId}
         nickname={nickname}
         avatar={avatar}
         roundIndex={currentIndex}
-        isReviewMode={isReviewMode} // 传入模式
+        isReviewMode={isReviewMode}
       />
     );
   }
 
-  // Final Podium
+  // FINAL PODIUM
   if (sessionData.status === "final_podium" || sessionData.status === "ended") {
     return (
       <div className="min-h-screen bg-slate-900 flex flex-col items-center text-white p-6">
