@@ -9,23 +9,42 @@ import React, {
   useCallback,
   memo,
 } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
+// FIX: 引入 Modifier 类型
 import {
   DndContext,
   closestCenter,
   DragEndEvent,
+  DragOverEvent,
   TouchSensor,
   MouseSensor,
   useSensor,
   useSensors,
+  DragOverlay,
+  defaultDropAnimationSideEffects,
+  useDroppable,
+  DragStartEvent,
+  Modifier,
 } from "@dnd-kit/core";
 import {
   arrayMove,
   SortableContext,
-  verticalListSortingStrategy,
+  rectSortingStrategy,
 } from "@dnd-kit/sortable";
-import { SortableItem } from "@/components/SortableItem";
-import { Clock, Loader2, Eye, CheckCircle, Trophy, Star } from "lucide-react";
+import { SortableItem, ItemCard } from "@/components/SortableItem";
+import {
+  Clock,
+  Loader2,
+  Eye,
+  CheckCircle,
+  Trophy,
+  Star,
+  GripHorizontal,
+  ArrowRight,
+  ArrowDown,
+  ArrowUp,
+} from "lucide-react";
 
 import { db } from "@/lib/firebase";
 import {
@@ -43,7 +62,95 @@ import {
 type Step = { id: string; content: string };
 type LevelData = { id?: string; title: string; correctOrder: Step[] };
 
-// --- 1. 独立倒计时组件 ---
+// --- 0. 内置修饰符 (解决无需安装包的问题) ---
+// 这个函数强制让拖拽物体的中心点对齐鼠标光标
+const snapCenterToCursor: Modifier = ({
+  transform,
+  activatorEvent,
+  draggingNodeRect,
+}) => {
+  if (draggingNodeRect && activatorEvent) {
+    const activationCoordinates = {
+      x:
+        "clientX" in activatorEvent
+          ? (activatorEvent as MouseEvent).clientX
+          : 0,
+      y:
+        "clientY" in activatorEvent
+          ? (activatorEvent as MouseEvent).clientY
+          : 0,
+    };
+
+    if (!activationCoordinates.x && !activationCoordinates.y) return transform;
+
+    const offsetX = activationCoordinates.x - draggingNodeRect.left;
+    const offsetY = activationCoordinates.y - draggingNodeRect.top;
+
+    return {
+      ...transform,
+      x: transform.x + offsetX - draggingNodeRect.width / 2,
+      y: transform.y + offsetY - draggingNodeRect.height / 2,
+    };
+  }
+  return transform;
+};
+
+// --- 1. 占位符组件 ---
+const SlotPlaceholder = ({
+  index,
+  arrowDir,
+  children,
+}: {
+  index: number;
+  arrowDir: "right" | "down" | "up" | "none";
+  children?: React.ReactNode;
+}) => {
+  const { setNodeRef, isOver } = useDroppable({ id: `slot-${index}` });
+  return (
+    <div className="relative flex flex-col items-center w-full">
+      <div
+        ref={setNodeRef}
+        className={`w-full min-h-[70px] rounded-[2rem] border-2 border-dashed flex flex-col justify-center items-center text-center p-3 transition-colors z-10
+                            ${
+                              isOver
+                                ? "border-yellow-400 bg-yellow-400/10"
+                                : "border-slate-500/40 bg-slate-800/30"
+                            }
+                            text-white/30 text-xs font-bold`}
+      >
+        {children || `Step ${index + 1}`}
+      </div>
+
+      {arrowDir !== "none" && (
+        <div
+          className={`absolute pointer-events-none text-white/50 drop-shadow-[0_1px_2px_rgba(0,0,0,0.3)] z-0
+                    ${
+                      arrowDir === "right"
+                        ? "-right-10 top-1/2 -translate-y-1/2"
+                        : ""
+                    } 
+                    ${
+                      arrowDir === "down"
+                        ? "-bottom-10 left-1/2 -translate-x-1/2"
+                        : ""
+                    }
+                    ${
+                      arrowDir === "up"
+                        ? "-top-10 left-1/2 -translate-x-1/2"
+                        : ""
+                    }
+                `}
+        >
+          {arrowDir === "right" && <ArrowRight size={48} strokeWidth={3} />}
+          {arrowDir === "down" && <ArrowDown size={48} strokeWidth={3} />}
+          {arrowDir === "up" && <ArrowUp size={48} strokeWidth={3} />}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- 2. Timer ---
 const TimerDisplay = memo(
   ({
     endTimeMillis,
@@ -56,7 +163,6 @@ const TimerDisplay = memo(
   }) => {
     const [display, setDisplay] = useState(0);
     const timeUpTriggered = useRef(false);
-
     useEffect(() => {
       if (isStopped) return;
       const calc = () =>
@@ -72,14 +178,12 @@ const TimerDisplay = memo(
       }, 200);
       return () => clearInterval(interval);
     }, [endTimeMillis, onTimeUp, isStopped]);
-
     if (isStopped)
       return (
         <span className="font-mono font-bold text-xl text-slate-300">
           --:--
         </span>
       );
-
     return (
       <span
         className={`font-mono font-bold text-xl ${
@@ -93,7 +197,7 @@ const TimerDisplay = memo(
 );
 TimerDisplay.displayName = "TimerDisplay";
 
-// --- 2. ActiveGame ---
+// --- 3. ActiveGame ---
 function ActiveGame({
   levelId,
   levelData,
@@ -113,28 +217,31 @@ function ActiveGame({
   roundIndex: number;
   isReviewMode: boolean;
 }) {
-  const [items, setItems] = useState<Step[]>([]);
+  const [bankItems, setBankItems] = useState<Step[]>([]);
+  const [answerSlots, setAnswerSlots] = useState<(Step | null)[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [hasSubmitted, setHasSubmitted] = useState(false);
   const [localScore, setLocalScore] = useState<number | null>(null);
+  const [mounted, setMounted] = useState(false);
 
-  // FIX: 增加一个 ref 来防止重复初始化导致答案重置
   const initializedRef = useRef(false);
-
-  // 使用 Ref 追踪最新的 items，防止闭包陷阱
-  const itemsRef = useRef<Step[]>([]);
+  const answerSlotsRef = useRef<(Step | null)[]>([]);
   useEffect(() => {
-    itemsRef.current = items;
-  }, [items]);
+    answerSlotsRef.current = answerSlots;
+  }, [answerSlots]);
+  useEffect(() => setMounted(true), []);
 
-  // Init: 只初始化一次！
+  const isFull = answerSlots.every((slot) => slot !== null);
+  const isLocked = hasSubmitted || isReviewMode;
+
   useEffect(() => {
     if (!initializedRef.current && levelData && levelData.correctOrder) {
-      setItems([...levelData.correctOrder].sort(() => Math.random() - 0.5));
-      initializedRef.current = true; // 标记为已初始化
+      setBankItems([...levelData.correctOrder].sort(() => Math.random() - 0.5));
+      setAnswerSlots(new Array(levelData.correctOrder.length).fill(null));
+      initializedRef.current = true;
     }
   }, [levelData]);
 
-  // Submit Logic
   const handleSubmit = useCallback(async () => {
     setHasSubmitted((prev) => {
       if (prev) return true;
@@ -143,34 +250,25 @@ function ActiveGame({
       sessionStorage.setItem(subKey, "true");
       return true;
     });
-
-    // 使用 ref 获取当前排列，保证准确
-    const currentItems = itemsRef.current;
-    if (!currentItems.length) return;
-
+    const currentAnswers = answerSlotsRef.current;
+    if (!currentAnswers.length || currentAnswers.some((s) => s === null)) {
+      alert("Please fill all slots before submitting.");
+      setHasSubmitted(false);
+      return;
+    }
     let correctCount = 0;
-    currentItems.forEach((item, index) => {
-      // 安全检查
-      if (
-        levelData.correctOrder[index] &&
-        item.id === levelData.correctOrder[index].id
-      ) {
-        correctCount++;
-      }
+    levelData.correctOrder.forEach((correctStep, index) => {
+      const userStep = currentAnswers[index];
+      if (userStep && userStep.id === correctStep.id) correctCount++;
     });
-
     const isTimeUp = Date.now() > endTimeMillis;
     const timeTaken = isTimeUp
       ? 0
       : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
-
-    // 只有全对才给时间分
-    const timeBonus =
-      correctCount === levelData.correctOrder.length ? timeTaken * 10 : 0;
+    const isPerfect = correctCount === levelData.correctOrder.length;
+    const timeBonus = isPerfect ? timeTaken * 10 : 0;
     const finalScore = correctCount * 100 + timeBonus;
-
     setLocalScore(finalScore);
-
     try {
       await addDoc(collection(db, "scores"), {
         sessionId,
@@ -196,35 +294,168 @@ function ActiveGame({
     roundIndex,
   ]);
 
-  // Review Auto-Submit
   useEffect(() => {
-    if (isReviewMode && !hasSubmitted) {
-      handleSubmit();
-    }
-  }, [isReviewMode, hasSubmitted, handleSubmit]);
+    if (isReviewMode && !hasSubmitted && isFull) handleSubmit();
+  }, [isReviewMode, hasSubmitted, handleSubmit, isFull]);
 
-  // Drag
+  // DnD Logic
   const sensors = useSensors(
     useSensor(MouseSensor),
     useSensor(TouchSensor, {
       activationConstraint: { delay: 100, tolerance: 5 },
     })
   );
-  function handleDragEnd(event: DragEndEvent) {
-    if (hasSubmitted || isReviewMode) return;
+  const findContainer = (id: string) => {
+    if (bankItems.find((i) => i.id === id)) return "bank";
+    if (answerSlots.find((i) => i?.id === id)) return "answer";
+    return null;
+  };
+  const getItemById = (id: string) =>
+    bankItems.find((i) => i.id === id) || answerSlots.find((i) => i?.id === id);
+
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveId(event.active.id as string);
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    if (over && active.id !== over.id) {
-      setItems((items) => {
-        const oldIndex = items.findIndex((i) => i.id === active.id);
-        const newIndex = items.findIndex((i) => i.id === over.id);
-        return arrayMove(items, oldIndex, newIndex);
-      });
+    setActiveId(null);
+    if (!over) return;
+    const activeIdStr = active.id as string;
+    const overIdStr = over.id as string;
+    const activeItem = getItemById(activeIdStr);
+    const sourceContainer = findContainer(activeIdStr);
+    const isOverAnswerContainer =
+      overIdStr === "answer-container" ||
+      overIdStr.startsWith("slot-") ||
+      findContainer(overIdStr) === "answer";
+    const targetContainer = isOverAnswerContainer
+      ? "answer"
+      : overIdStr === "bank-container"
+      ? "bank"
+      : null;
+
+    if (!activeItem || !sourceContainer || !targetContainer) return;
+
+    if (sourceContainer === "answer" && targetContainer === "answer") {
+      let activeIndex = answerSlots.findIndex((s) => s?.id === activeIdStr);
+      let overIndex = -1;
+      if (overIdStr.startsWith("slot-"))
+        overIndex = parseInt(overIdStr.replace("slot-", ""), 10);
+      else overIndex = answerSlots.findIndex((s) => s?.id === overIdStr);
+
+      if (activeIndex !== -1 && overIndex !== -1 && activeIndex !== overIndex) {
+        const itemToReturn = answerSlots[overIndex];
+        if (isFull) {
+          if (answerSlots[activeIndex] && answerSlots[overIndex])
+            setAnswerSlots((slots) => arrayMove(slots, activeIndex, overIndex));
+        } else {
+          if (!itemToReturn)
+            setAnswerSlots((slots) => {
+              const newSlots = [...slots];
+              newSlots[overIndex] = activeItem as Step;
+              newSlots[activeIndex] = null;
+              return newSlots;
+            });
+        }
+      }
+    } else if (sourceContainer === "bank" && targetContainer === "answer") {
+      let targetIndex = -1;
+      if (overIdStr.startsWith("slot-"))
+        targetIndex = parseInt(overIdStr.replace("slot-", ""), 10);
+      else targetIndex = answerSlots.findIndex((s) => s?.id === overIdStr);
+
+      if (targetIndex !== -1) {
+        const itemToReturn = answerSlots[targetIndex];
+        const newItem = activeItem as Step;
+        setBankItems((items) => items.filter((i) => i.id !== activeIdStr));
+        setAnswerSlots((slots) => {
+          const newSlots = [...slots];
+          newSlots[targetIndex] = newItem;
+          return newSlots;
+        });
+        if (itemToReturn) setBankItems((items) => [...items, itemToReturn]);
+      }
+    } else if (sourceContainer === "answer" && targetContainer === "bank") {
+      const activeIndex = answerSlots.findIndex((s) => s?.id === activeIdStr);
+      if (activeIndex !== -1) {
+        setAnswerSlots((slots) => {
+          const newSlots = [...slots];
+          newSlots[activeIndex] = null;
+          return newSlots;
+        });
+        setBankItems((items) => [...items, activeItem as Step]);
+      }
     }
-  }
+  };
 
-  const isLocked = hasSubmitted || isReviewMode;
+  const isLockedUI = isLocked;
+  const activeItemData = activeId ? getItemById(activeId) : null;
 
-  if (!items.length)
+  // --- U-Shape Layout Calculation ---
+  const totalSlots = levelData?.correctOrder.length || 0;
+  const midPoint = Math.ceil(totalSlots / 2);
+
+  const leftIndices = Array.from({ length: midPoint }, (_, i) => i);
+  const rightIndices = Array.from(
+    { length: totalSlots - midPoint },
+    (_, i) => totalSlots - 1 - i
+  );
+
+  const renderSlot = (index: number, colType: "left" | "right") => {
+    const item = answerSlots[index];
+    let arrowDir: "right" | "down" | "up" | "none" = "none";
+
+    if (colType === "left") {
+      if (index === midPoint - 1) arrowDir = "right";
+      else arrowDir = "down";
+    } else {
+      if (index === totalSlots - 1) arrowDir = "none";
+      else arrowDir = "up";
+    }
+
+    if (!item) {
+      return (
+        <SlotPlaceholder
+          key={`slot-${index}`}
+          index={index}
+          arrowDir={arrowDir}
+        />
+      );
+    }
+
+    let status: "normal" | "correct" | "wrong" = "normal";
+    let correctSolution = undefined;
+    if (isReviewMode) {
+      const correctStep = levelData.correctOrder[index];
+      if (correctStep && item.id === correctStep.id) status = "correct";
+      else {
+        status = "wrong";
+        correctSolution = correctStep ? correctStep.content : "Missing";
+      }
+    }
+
+    return (
+      <SortableContext
+        key={item.id}
+        items={[item.id]}
+        strategy={rectSortingStrategy}
+      >
+        <SortableItem
+          key={item.id}
+          id={item.id}
+          content={item.content}
+          disabled={isLockedUI}
+          status={status}
+          variant="answer"
+          correctSolution={correctSolution}
+          arrowDir={arrowDir}
+        />
+      </SortableContext>
+    );
+  };
+
+  if (!levelData)
     return (
       <div className="min-h-screen bg-indigo-900 flex items-center justify-center text-white">
         <Loader2 className="animate-spin" /> Loading...
@@ -232,10 +463,10 @@ function ActiveGame({
     );
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-indigo-600 via-purple-600 to-purple-900 flex flex-col items-center py-8">
-      <div className="w-full max-w-md px-6 flex justify-between items-center mb-6 text-white">
-        <div className="flex items-center gap-2 bg-white/20 px-4 py-2 rounded-full backdrop-blur-sm">
-          <Clock size={20} />
+    <div className="min-h-screen bg-gradient-to-b from-indigo-600 via-purple-600 to-purple-900 flex flex-col h-screen overflow-hidden">
+      <div className="w-full px-4 pt-4 pb-2 flex justify-between items-center text-white shrink-0">
+        <div className="flex items-center gap-2 bg-white/20 px-3 py-1.5 rounded-full backdrop-blur-sm">
+          <Clock size={18} />
           <TimerDisplay
             endTimeMillis={endTimeMillis}
             onTimeUp={handleSubmit}
@@ -243,58 +474,133 @@ function ActiveGame({
           />
         </div>
         <div className="font-bold flex items-center gap-2">
-          <span className="text-2xl">{avatar}</span> {nickname}
+          <span className="text-xl">{avatar}</span> {nickname}
         </div>
       </div>
 
-      <h1 className="text-2xl font-extrabold mb-2 text-white text-center px-4 drop-shadow-md">
-        {isReviewMode ? "Round Results" : levelData.title}
-      </h1>
-
-      {isReviewMode && localScore !== null && (
-        <div className="mb-6 bg-white/10 backdrop-blur-md border border-white/20 p-4 rounded-2xl flex flex-col items-center animate-in zoom-in duration-300">
-          <div className="text-xs text-indigo-200 font-bold uppercase tracking-widest mb-1">
-            Your Score
+      <div className="px-4 pb-2 text-center shrink-0">
+        <h1 className="text-xl font-extrabold text-white drop-shadow-md leading-tight mb-1">
+          {isReviewMode ? "Round Results" : levelData.title}
+        </h1>
+        {!isLocked && (
+          <p className="text-red-500 text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-1 animate-pulse">
+            <GripHorizontal size={14} />{" "}
+            {isFull ? "Drag to Switch Order" : "Drag to Fill Slots"}{" "}
+            <GripHorizontal size={14} />
+          </p>
+        )}
+        {isReviewMode && localScore !== null && (
+          <div className="mt-2 bg-white/10 backdrop-blur-md rounded-lg p-2 flex justify-center items-center gap-2 border border-white/20">
+            <span className="text-xs text-indigo-100 font-bold uppercase">
+              Score
+            </span>
+            <span className="text-2xl font-black text-yellow-400 flex items-center gap-1">
+              {localScore} <Star size={18} fill="currentColor" />
+            </span>
           </div>
-          <div className="text-5xl font-black text-yellow-400 drop-shadow-sm flex items-center gap-2">
-            {localScore}{" "}
-            <Star fill="currentColor" size={32} className="text-yellow-500" />
-          </div>
-        </div>
-      )}
-
-      <div className="w-full max-w-md px-6 mb-32">
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleDragEnd}
-        >
-          <SortableContext items={items} strategy={verticalListSortingStrategy}>
-            {items.map((item, index) => (
-              <SortableItem
-                key={item.id}
-                id={item.id}
-                content={item.content}
-                isLast={index === items.length - 1}
-                disabled={isLocked}
-                status={
-                  isReviewMode
-                    ? item.id === levelData.correctOrder[index]?.id
-                      ? "correct"
-                      : "wrong"
-                    : "normal"
-                }
-              />
-            ))}
-          </SortableContext>
-        </DndContext>
+        )}
       </div>
 
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+      >
+        {/* Bank */}
+        <div className="px-4 pb-2 shrink-0 max-h-[30vh] overflow-y-auto custom-scrollbar">
+          <div className="bg-black/20 rounded-xl p-3 border border-white/10 min-h-[80px]">
+            <div className="text-[10px] font-bold text-indigo-300 uppercase mb-2 tracking-wider">
+              Option Bank ({bankItems.length})
+            </div>
+            <SortableContext
+              items={bankItems}
+              strategy={rectSortingStrategy}
+              id="bank-container"
+            >
+              <div className="grid grid-cols-2 gap-2" id="bank-container">
+                {bankItems.map((item) => (
+                  <SortableItem
+                    key={item.id}
+                    id={item.id}
+                    content={item.content}
+                    disabled={isLockedUI}
+                    status="normal"
+                    variant="bank"
+                    arrowDir="none"
+                  />
+                ))}
+              </div>
+            </SortableContext>
+            {bankItems.length === 0 && (
+              <div className="text-center text-white/30 text-xs py-4 italic">
+                All items placed
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Answer Area (Split Columns for U-Shape) */}
+        <div className="flex-1 px-4 pb-32 overflow-y-auto min-h-0 custom-scrollbar relative">
+          <div
+            className="bg-white/10 rounded-xl p-4 min-h-full border-2 border-dashed border-white/30 relative"
+            id="answer-container"
+          >
+            <div className="text-[10px] font-bold text-indigo-200 uppercase mb-4 tracking-wider flex justify-between">
+              <span>Your Order</span>
+              <span>
+                {answerSlots.filter((s) => s !== null).length} / {totalSlots}
+              </span>
+            </div>
+
+            <div className="flex justify-between gap-12 h-full">
+              {/* 左列 */}
+              <div className="flex-1 flex flex-col gap-16">
+                {leftIndices.map((idx) => renderSlot(idx, "left"))}
+              </div>
+
+              {/* 右列 */}
+              <div className="flex-1 flex flex-col gap-16 justify-end">
+                {rightIndices.map((idx) => renderSlot(idx, "right"))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* FIX: 使用 snapCenterToCursor 修饰符，同时移除 dropAnimation */}
+        {mounted &&
+          createPortal(
+            <DragOverlay modifiers={[snapCenterToCursor]} zIndex={1000}>
+              {activeId && activeItemData ? (
+                <div className="w-[150px] opacity-90 cursor-grabbing">
+                  <ItemCard
+                    id={activeId}
+                    content={activeItemData.content}
+                    disabled={false}
+                    status="normal"
+                    variant="answer"
+                    arrowDir="none"
+                    isDragging={true}
+                  />
+                </div>
+              ) : null}
+            </DragOverlay>,
+            document.body
+          )}
+      </DndContext>
+
+      {/* Footer */}
       <div className="fixed bottom-0 w-full bg-white p-4 rounded-t-2xl shadow-2xl flex flex-col items-center z-50">
         {!hasSubmitted && !isReviewMode ? (
           <button
             onClick={handleSubmit}
-            className="w-full max-w-md bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-xl text-xl shadow-lg active:scale-95 transition-all"
+            disabled={!isFull}
+            className={`w-full max-w-md text-white font-black py-4 rounded-xl text-xl shadow-lg transition-all 
+                        ${
+                          isFull
+                            ? "bg-green-500 hover:bg-green-600 active:scale-95"
+                            : "bg-slate-400 cursor-not-allowed"
+                        }`}
           >
             SUBMIT
           </button>
@@ -330,7 +636,6 @@ function GameContent() {
   const [finalStandings, setFinalStandings] = useState<any[]>([]);
   const [myRank, setMyRank] = useState(0);
 
-  // Sync Session
   useEffect(() => {
     if (!sessionId) return;
     const unsub = onSnapshot(doc(db, "sessions", sessionId), (docSnap) => {
@@ -339,7 +644,6 @@ function GameContent() {
     return () => unsub();
   }, [sessionId]);
 
-  // Sync Join
   useEffect(() => {
     const reportJoin = async () => {
       const joinKey = `process_game_${sessionId}_joined`;
@@ -357,7 +661,6 @@ function GameContent() {
     reportJoin();
   }, [sessionId, nickname, avatar]);
 
-  // Sync Final
   useEffect(() => {
     if (sessionData?.status === "final_podium") {
       const fetchScores = async () => {
@@ -408,14 +711,12 @@ function GameContent() {
     );
   }
 
-  // GAME & REVIEW
   if (
     sessionData.status === "playing" ||
     sessionData.status === "review" ||
     sessionData.status === "leaderboard"
   ) {
     const currentIndex = sessionData.currentLevelIndex;
-    // 提取数据
     const playlistItem = sessionData.playlist?.[currentIndex];
     const levelData = playlistItem?.levelData;
     const currentLevelId = playlistItem?.levelId;
@@ -423,7 +724,7 @@ function GameContent() {
     const isReviewMode =
       sessionData.status === "review" || sessionData.status === "leaderboard";
 
-    if (!levelData)
+    if (!levelData || !currentLevelId)
       return (
         <div className="min-h-screen bg-indigo-900 text-white flex items-center justify-center">
           Loading Level...
@@ -432,8 +733,8 @@ function GameContent() {
 
     return (
       <ActiveGame
-        key={`${sessionId}_round_${currentIndex}`} // 轮次变化时强制重置
-        levelId={currentLevelId} // 显式传递 ID
+        key={`${sessionId}_round_${currentIndex}`}
+        levelId={currentLevelId}
         levelData={levelData}
         endTimeMillis={endTime}
         sessionId={sessionId}

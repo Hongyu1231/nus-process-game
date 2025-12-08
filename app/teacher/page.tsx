@@ -33,12 +33,14 @@ import {
   Save,
   LayoutList,
 } from "lucide-react";
+
 import { LEVELS } from "@/data/levels";
 
-// --- TYPE DEFINITIONS ---
+// --- 类型定义 ---
 type Step = { id: string; content: string };
 type LevelData = { id: string; title: string; correctOrder: Step[] };
 type CombinedLevelData = LevelData & { type: "default" | "custom" };
+
 type SessionStatus =
   | "setup"
   | "waiting"
@@ -59,7 +61,6 @@ type ScoreData = {
   levelId: string;
   roundIndex: number;
 };
-type CustomLevel = { id: string; title: string; correctOrder: Step[] };
 
 export default function TeacherPage() {
   const [status, setStatus] = useState<SessionStatus>("setup");
@@ -74,6 +75,7 @@ export default function TeacherPage() {
   const [newLevelTitle, setNewLevelTitle] = useState("");
   const [newLevelSteps, setNewLevelSteps] = useState<string[]>(["", "", ""]);
   const [customLevels, setCustomLevels] = useState<CombinedLevelData[]>([]);
+
   const [rawScores, setRawScores] = useState<ScoreData[]>([]);
   const [players, setPlayers] = useState<any[]>([]);
   const [baseUrl, setBaseUrl] = useState("");
@@ -104,18 +106,10 @@ export default function TeacherPage() {
 
   const allLevels = useMemo(() => {
     const defaults = Object.values(LEVELS).map(
-      (l) =>
-        ({
-          ...l,
-          type: "default",
-        } as CombinedLevelData)
+      (l) => ({ ...l, type: "default" } as CombinedLevelData)
     );
     const customs = customLevels.map(
-      (l) =>
-        ({
-          ...l,
-          type: "custom",
-        } as CombinedLevelData)
+      (l) => ({ ...l, type: "custom" } as CombinedLevelData)
     );
     return [...defaults, ...customs];
   }, [customLevels]);
@@ -129,14 +123,11 @@ export default function TeacherPage() {
     return uniqueNames.size;
   }, [rawScores, currentLevelIndex, currentLevelConfig]);
 
-  // --- 修复：累计排名 (增加去重逻辑) ---
   const leaderboardData = useMemo(() => {
     const totals: Record<
       string,
       { nickname: string; avatar: string; totalScore: number }
     > = {};
-
-    // 1. 初始化玩家
     players.forEach((p) => {
       totals[p.nickname] = {
         nickname: p.nickname,
@@ -145,27 +136,16 @@ export default function TeacherPage() {
       };
     });
 
-    // 2. 分数去重：确保每个玩家每轮只算一次分
-    const uniqueScores: Record<string, number> = {}; // Key: "nickname_roundIndex"
-
+    // Deduplication logic
+    const uniqueScores: Record<string, number> = {};
     rawScores.forEach((s) => {
-      // 使用昵称+轮次作为唯一键
       const key = `${s.nickname}_${s.roundIndex}`;
-      // 存入分数 (如果有重复，后者覆盖前者，通常无所谓因为分数是一样的)
       uniqueScores[key] = s.score;
     });
 
-    // 3. 累加去重后的分数
     Object.entries(uniqueScores).forEach(([key, score]) => {
-      // key 格式为 "nickname_roundIndex"
-      // 注意：如果昵称包含下划线可能会有问题，最好用lastIndexOf，但这里简单处理先split
-      // 更稳妥的方式是重构 uniqueScores 的结构，但这里简单起见：
-      // 我们假设昵称不含特殊分隔符，或者我们只取前部分
-      // 为了安全，我们可以存对象而不是 key string
-
-      // Hack fix for split:
-      const lastUnderscoreIndex = key.lastIndexOf("_");
-      const nickname = key.substring(0, lastUnderscoreIndex);
+      const parts = key.split("_");
+      const nickname = parts.slice(0, -1).join("_");
 
       if (totals[nickname]) {
         totals[nickname].totalScore += score;
@@ -175,17 +155,19 @@ export default function TeacherPage() {
     return Object.values(totals).sort((a, b) => b.totalScore - a.totalScore);
   }, [rawScores, players]);
 
-  // --- Handlers ---
+  // --- Handlers: Creator ---
   const handleSaveNewLevel = async () => {
     if (!newLevelTitle.trim()) return alert("Title is required");
     const validSteps = newLevelSteps
       .map((s) => s.trim())
       .filter((s) => s !== "");
     if (validSteps.length < 2) return alert("Need at least 2 steps");
+
     const stepNames = validSteps.map((s) => s.toLowerCase());
     if (new Set(stepNames).size !== stepNames.length) {
-      return alert("Error: Step names must be unique within a level.");
+      return alert("Error: Step names must be unique within a procedure.");
     }
+
     const levelData = {
       title: newLevelTitle,
       correctOrder: validSteps.map((s, i) => ({
@@ -194,6 +176,7 @@ export default function TeacherPage() {
       })),
       createdAt: serverTimestamp(),
     };
+
     try {
       await addDoc(collection(db, "custom_levels"), levelData);
       setIsCreatorOpen(false);
@@ -201,19 +184,29 @@ export default function TeacherPage() {
       setNewLevelSteps(["", "", ""]);
     } catch (e) {
       console.error(e);
-      alert("Error saving level");
+      alert("Error saving procedure");
     }
   };
+
   const handleDeleteLevel = async (levelId: string) => {
-    if (confirm("Delete this level?")) {
+    if (
+      confirm(
+        "Are you sure you want to delete this custom procedure? This cannot be undone."
+      )
+    ) {
       try {
         await deleteDoc(doc(db, "custom_levels", levelId));
+        if (selectedLevelId === levelId) {
+          setSelectedLevelId("");
+          setSelectedLevelData(null);
+        }
       } catch (e) {
         console.error(e);
-        alert("Error deleting");
+        alert("Error deleting procedure.");
       }
     }
   };
+
   const handleAddStepRow = () => setNewLevelSteps([...newLevelSteps, ""]);
   const handleStepChange = (idx: number, val: string) => {
     const newSteps = [...newLevelSteps];
@@ -227,8 +220,14 @@ export default function TeacherPage() {
     setSelectedLevelId(level.id);
     setSelectedLevelData(level);
   };
+
   const handleAddToPlaylist = () => {
     if (!selectedLevelData) return;
+    const isAlreadyAdded = playlist.some(
+      (p) => p.levelId === selectedLevelData.id
+    );
+    if (isAlreadyAdded) return;
+
     setPlaylist([
       ...playlist,
       {
@@ -237,9 +236,14 @@ export default function TeacherPage() {
         levelData: selectedLevelData,
       },
     ]);
+
+    setSelectedLevelId("");
+    setSelectedLevelData(null);
   };
+
+  // --- Game Flow Handlers ---
   const handleCreateLobby = async () => {
-    if (playlist.length === 0) return alert("Please add levels!");
+    if (playlist.length === 0) return alert("Please add procedures!");
     const newSessionId = Date.now().toString();
     setSessionId(newSessionId);
     setStatus("waiting");
@@ -313,31 +317,29 @@ export default function TeacherPage() {
 
   useEffect(() => {
     let interval: any;
-    if (status === "playing") {
-      const duration = playlist[currentLevelIndex]?.timeLimit;
-      if (duration) {
-        interval = setInterval(() => {
-          const now = Date.now();
-          const elapsed = Math.floor((now - startTimeRef.current) / 1000);
-          const remaining = Math.max(0, duration - elapsed);
-          setTimerDisplay(remaining);
-          if (remaining === 0) {
-            clearInterval(interval);
-            handleEndLevel();
-          }
-        }, 200);
-      }
+    const duration = playlist[currentLevelIndex]?.timeLimit;
+    if (status === "playing" && duration) {
+      interval = setInterval(() => {
+        const now = Date.now();
+        const elapsed = Math.floor((now - startTimeRef.current) / 1000);
+        const remaining = Math.max(0, duration - elapsed);
+        setTimerDisplay(remaining);
+        if (remaining === 0) {
+          clearInterval(interval);
+          handleEndLevel();
+        }
+      }, 200);
     }
     return () => clearInterval(interval);
-  }, [status, currentLevelIndex, playlist.length]); // Fix dependency
+  }, [status, currentLevelIndex, playlist.length]);
 
   useEffect(() => {
     if (status === "setup" || !sessionId) return;
     const unsub1 = onSnapshot(
       query(collection(db, "scores"), where("sessionId", "==", sessionId)),
-      (s) => {
+      (snap) => {
         const list: ScoreData[] = [];
-        s.forEach((doc) =>
+        snap.forEach((doc) =>
           list.push({ id: doc.id, ...doc.data() } as ScoreData)
         );
         setRawScores(list);
@@ -345,9 +347,9 @@ export default function TeacherPage() {
     );
     const unsub2 = onSnapshot(
       query(collection(db, "players"), where("sessionId", "==", sessionId)),
-      (s) => {
+      (snap) => {
         const list: any[] = [];
-        s.forEach((doc) => list.push(doc.data()));
+        snap.forEach((doc) => list.push(doc.data()));
         setPlayers(list);
       }
     );
@@ -366,7 +368,7 @@ export default function TeacherPage() {
         <div className="max-w-2xl w-full bg-slate-800 rounded-3xl p-8 border border-slate-700 shadow-2xl">
           <div className="flex justify-between items-center mb-6">
             <h2 className="text-2xl font-black text-white flex items-center gap-2">
-              <PenTool /> Create Level
+              <PenTool /> Create Procedure
             </h2>
             <button
               onClick={() => setIsCreatorOpen(false)}
@@ -379,7 +381,7 @@ export default function TeacherPage() {
           <div className="space-y-6">
             <div>
               <label className="block text-xs font-bold text-slate-500 uppercase mb-2">
-                Level Title
+                Procedure Title
               </label>
               <input
                 value={newLevelTitle}
@@ -426,7 +428,7 @@ export default function TeacherPage() {
               onClick={handleSaveNewLevel}
               className="w-full bg-green-500 hover:bg-green-600 text-white font-black py-4 rounded-xl shadow-lg flex items-center justify-center gap-2"
             >
-              <Save size={20} /> SAVE LEVEL
+              <Save size={20} /> SAVE PROCEDURE
             </button>
           </div>
         </div>
@@ -436,6 +438,10 @@ export default function TeacherPage() {
 
   // ================= VIEW: SETUP =================
   if (status === "setup") {
+    const isSelectedAlreadyAdded = selectedLevelId
+      ? playlist.some((p) => p.levelId === selectedLevelId)
+      : false;
+
     return (
       <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
         <h1 className="text-4xl font-black text-indigo-400 mb-8">Game Setup</h1>
@@ -446,7 +452,7 @@ export default function TeacherPage() {
               Add to Playlist
             </h2>
             <div className="flex justify-between items-center mb-2">
-              <label className="text-sm font-bold">Select Level</label>
+              <label className="text-sm font-bold">Select Procedure</label>
               <button
                 onClick={() => setIsCreatorOpen(true)}
                 className="bg-slate-700 hover:bg-slate-600 px-3 py-1 rounded-lg text-xs font-bold flex items-center gap-1"
@@ -455,7 +461,7 @@ export default function TeacherPage() {
               </button>
             </div>
             <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto custom-scrollbar">
-              {allLevels.map((l) => {
+              {allLevels.map((l: CombinedLevelData) => {
                 const isAdded = playlist.some((p) => p.levelId === l.id);
                 return (
                   <button
@@ -486,7 +492,7 @@ export default function TeacherPage() {
                               e.stopPropagation();
                               handleDeleteLevel(l.id);
                             }}
-                            className="text-red-400 hover:text-red-300 cursor-pointer p-1"
+                            className="text-red-400 hover:text-red-300 p-1 cursor-pointer"
                           >
                             <Trash2 size={12} />
                           </div>
@@ -510,7 +516,7 @@ export default function TeacherPage() {
                   step="1"
                   value={tempTime}
                   onChange={(e) => setTempTime(Number(e.target.value))}
-                  className="flex-1 accent-indigo-500 h-2 bg-slate-600 rounded-lg cursor-pointer"
+                  className="flex-1 accent-indigo-500 h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer"
                 />
                 <input
                   type="number"
@@ -520,12 +526,15 @@ export default function TeacherPage() {
                 />
               </div>
             </div>
+
             <button
-              onClick={handleAddToPlaylist}
-              disabled={!selectedLevelId}
+              onClick={() => handleAddToPlaylist()}
+              disabled={!selectedLevelId || isSelectedAlreadyAdded}
               className="mt-auto w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 disabled:text-slate-500 text-white font-black p-4 rounded-xl flex items-center justify-center gap-2"
             >
-              ADD SELECTED LEVEL
+              {isSelectedAlreadyAdded
+                ? "ADDED TO QUEUE"
+                : "ADD SELECTED PROCEDURE"}
             </button>
           </div>
           {/* Right */}
@@ -563,7 +572,7 @@ export default function TeacherPage() {
               {playlist.length === 0 && (
                 <div className="text-center text-slate-600 mt-20 flex flex-col items-center">
                   <LayoutList size={48} className="mb-2 opacity-50" />
-                  Select levels from library
+                  Select procedures from library
                 </div>
               )}
             </div>
@@ -581,13 +590,12 @@ export default function TeacherPage() {
   }
 
   // 2. WAITING ROOM
-  if (status === "waiting")
+  if (status === "waiting") {
     return (
       <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
         <h1 className="text-5xl font-black mb-4 tracking-tight">
           Join Session
         </h1>
-
         <div className="bg-white p-6 rounded-3xl shadow-2xl mb-8 flex flex-col items-center max-w-md w-full">
           <div className="mb-6 w-full flex justify-center">
             <QRCode value={joinUrl} size={280} />
@@ -611,7 +619,7 @@ export default function TeacherPage() {
               key={i}
               className="bg-slate-800 p-3 rounded-lg flex items-center gap-3 border border-slate-700 animate-in zoom-in"
             >
-              <span className="text-2xl">{p.avatar}</span>
+              <span className="text-2xl">{p.avatar}</span>{" "}
               <span className="font-bold truncate text-sm">{p.nickname}</span>
             </div>
           ))}
@@ -624,10 +632,11 @@ export default function TeacherPage() {
         </button>
       </div>
     );
+  }
 
-  const currentLevelTitle = playlist[currentLevelIndex]?.levelData.title;
-
-  if (status === "playing")
+  // 3. PLAYING
+  if (status === "playing") {
+    const currentLevelData = playlist[currentLevelIndex].levelData;
     return (
       <div className="min-h-screen bg-slate-900 text-white p-6 flex flex-col items-center justify-center p-6 relative">
         <div className="absolute top-6 right-6 bg-slate-800 border border-slate-700 px-6 py-3 rounded-xl flex items-center gap-4 shadow-lg">
@@ -645,11 +654,11 @@ export default function TeacherPage() {
         <div className="text-xl font-bold text-slate-400 uppercase tracking-widest mb-4 border border-slate-700 px-4 py-1 rounded-full">
           Round {currentLevelIndex + 1} / {playlist.length}
         </div>
-        <h1 className="text-6xl font-black mb-16 text-center">
-          {currentLevelTitle}
+        <h1 className="text-6xl font-black mb-16 text-center leading-tight bg-clip-text text-transparent bg-gradient-to-br from-white to-slate-400">
+          {currentLevelData?.title}
         </h1>
         <div
-          className={`font-mono text-[12rem] font-black mb-16 ${
+          className={`font-mono text-[12rem] font-black mb-16 leading-none ${
             timerDisplay < 10 ? "text-red-500 animate-pulse" : "text-white"
           }`}
         >
@@ -663,28 +672,30 @@ export default function TeacherPage() {
         </button>
       </div>
     );
+  }
 
-  if (status === "review")
+  // 4. REVIEW
+  if (status === "review") {
+    const currentLevelData = playlist[currentLevelIndex].levelData;
     return (
       <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
-        <h1 className="text-4xl font-black text-green-400 mb-8">
+        <h1 className="text-4xl font-black text-green-400 mb-8 uppercase tracking-wider">
           Correct Order
         </h1>
-        <div className="flex flex-col gap-3 w-full max-w-lg mb-10 overflow-y-auto custom-scrollbar">
-          {playlist[currentLevelIndex]?.levelData.correctOrder.map(
-            (step, idx) => (
-              <div
-                key={step.id}
-                className="bg-slate-800 border-l-4 border-green-500 p-5 rounded-r-xl flex items-center gap-4"
-              >
-                <span className="font-black text-2xl text-slate-500 w-8">
-                  {idx + 1}
-                </span>
-                <span className="font-bold text-xl">{step.content}</span>
-                <CheckCircle className="ml-auto text-green-500" size={24} />
-              </div>
-            )
-          )}
+        <div className="flex flex-col gap-3 w-full max-w-lg mb-10 flex-1 overflow-y-auto custom-scrollbar">
+          {currentLevelData?.correctOrder.map((step, idx) => (
+            <div
+              key={step.id}
+              className="bg-slate-800 border-l-4 border-green-500 p-5 rounded-r-xl flex items-center gap-4 shadow-lg animate-in slide-in-from-left"
+              style={{ animationDelay: `${idx * 100}ms` }}
+            >
+              <span className="font-black text-2xl text-slate-500 w-8">
+                {idx + 1}
+              </span>
+              <span className="font-bold text-xl">{step.content}</span>
+              <CheckCircle className="ml-auto text-green-500" size={24} />
+            </div>
+          ))}
         </div>
         <button
           onClick={handleShowLeaderboard}
@@ -694,27 +705,47 @@ export default function TeacherPage() {
         </button>
       </div>
     );
+  }
 
-  if (status === "leaderboard")
+  // 5. LEADERBOARD
+  if (status === "leaderboard") {
     return (
       <div className="min-h-screen bg-slate-900 text-white p-8 flex flex-col items-center">
-        <h1 className="text-4xl font-black text-yellow-400 mb-2">Standings</h1>
+        <h1 className="text-4xl font-black text-yellow-400 mb-2 uppercase tracking-widest">
+          Standings
+        </h1>
         <p className="text-slate-400 mb-8 font-bold bg-slate-800 px-4 py-1 rounded-full">
           After Round {currentLevelIndex + 1}
         </p>
+
         <div className="w-full max-w-3xl bg-slate-800 rounded-3xl p-8 mb-8 flex-1 overflow-y-auto custom-scrollbar border border-slate-700 shadow-2xl">
-          <table className="w-full text-left text-xl">
-            <tbody>
+          <table className="w-full">
+            <thead className="text-left text-slate-500 uppercase text-xs font-bold border-b border-slate-700">
+              <tr>
+                <th className="pb-4 pl-4">Rank</th>
+                <th>Player</th>
+                <th className="text-right pr-4">Total Score</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700/50">
               {leaderboardData.map((d, i) => (
-                <tr key={i}>
+                <tr
+                  key={i}
+                  className="text-2xl group hover:bg-white/5 transition-colors"
+                >
                   <td className="py-4 pl-4 font-bold text-slate-500 w-20">
-                    #{i + 1}
+                    {i === 0
+                      ? "🥇"
+                      : i === 1
+                      ? "🥈"
+                      : i === 2
+                      ? "🥉"
+                      : `#${i + 1}`}
                   </td>
-                  <td className="py-4 font-bold flex items-center gap-3">
-                    <span className="text-3xl">{d.avatar}</span>
-                    <span>{d.nickname}</span>
+                  <td className="py-4 font-bold flex items-center gap-3 text-white">
+                    <span className="text-3xl">{d.avatar}</span> {d.nickname}
                   </td>
-                  <td className="py-4 font-black text-right text-green-400">
+                  <td className="py-4 pr-4 font-black text-right text-green-400">
                     {d.totalScore}
                   </td>
                 </tr>
@@ -722,25 +753,29 @@ export default function TeacherPage() {
             </tbody>
           </table>
         </div>
+
         {currentLevelIndex + 1 < playlist.length ? (
           <button
             onClick={handleStartNextRound}
-            className="bg-green-500 hover:bg-green-600 px-12 py-6 rounded-2xl font-black text-2xl shadow-lg"
+            className="bg-green-500 hover:bg-green-600 px-12 py-6 rounded-2xl font-black text-2xl shadow-[0_6px_0_rgb(21,128,61)] active:translate-y-1 flex items-center gap-4 transition-all"
           >
-            START ROUND {currentLevelIndex + 2}
+            START ROUND {currentLevelIndex + 2} <Play fill="currentColor" />
           </button>
         ) : (
           <button
             onClick={handleStartNextRound}
-            className="bg-yellow-500 hover:bg-yellow-600 text-black px-12 py-6 rounded-2xl font-black text-2xl shadow-lg"
+            className="bg-yellow-500 hover:bg-yellow-600 text-black px-12 py-6 rounded-2xl font-black text-2xl shadow-[0_6px_0_rgb(202,138,4)] active:translate-y-1 transition-all"
           >
             FINAL PODIUM
           </button>
         )}
       </div>
     );
+  }
 
-  if (status === "final_podium")
+  // 6. FINAL PODIUM
+  if (status === "final_podium") {
+    const top3 = leaderboardData.slice(0, 3);
     return (
       <div className="min-h-screen bg-slate-900 text-white p-4 flex flex-col items-center justify-center bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-800 via-slate-900 to-slate-950">
         <h1 className="text-5xl md:text-6xl font-black text-yellow-400 mb-12 tracking-wider drop-shadow-[0_4px_4px_rgba(0,0,0,0.5)]">
@@ -748,21 +783,19 @@ export default function TeacherPage() {
         </h1>
         <div className="flex items-end justify-center gap-4 mb-8 w-full max-w-4xl h-[500px]">
           {/* 2nd Place */}
-          {leaderboardData[1] && (
+          {top3[1] && (
             <div className="w-1/3 flex flex-col items-center animate-in slide-in-from-bottom duration-1000 delay-300 z-10">
-              {/* Avatar Bubble */}
               <div className="mb-4 p-3 bg-slate-700 rounded-full border-4 border-slate-600 shadow-lg">
                 <div className="text-5xl animate-pulse-slow">
-                  {leaderboardData[1].avatar}
+                  {top3[1].avatar}
                 </div>
               </div>
-              {/* Text Area */}
               <div className="mb-6 text-center">
                 <div className="text-xl font-bold truncate w-32 text-center mx-auto">
-                  {leaderboardData[1].nickname}
+                  {top3[1].nickname}
                 </div>
                 <div className="text-slate-400 font-mono font-bold text-sm">
-                  {leaderboardData[1].totalScore} pts
+                  {top3[1].totalScore} pts
                 </div>
               </div>
               <div className="w-full h-64 bg-gradient-to-t from-slate-600 to-slate-500 rounded-t-2xl flex items-start justify-center pt-4 relative shadow-2xl border-t-4 border-slate-400">
@@ -774,24 +807,22 @@ export default function TeacherPage() {
             </div>
           )}
           {/* 1st Place */}
-          {leaderboardData[0] && (
+          {top3[0] && (
             <div className="w-1/3 flex flex-col items-center animate-in slide-in-from-bottom duration-1000 z-20 -mt-12">
-              {/* Avatar Bubble - Bigger & Golden */}
               <div className="mb-4 p-5 bg-yellow-500 rounded-full border-8 border-yellow-300 shadow-[0_0_40px_rgba(250,204,21,0.6)] animate-bounce-slow relative">
                 <Trophy
                   size={30}
                   className="absolute -top-6 -right-4 text-yellow-300 rotate-12 drop-shadow-lg"
                   fill="currentColor"
                 />
-                <div className="text-7xl">{leaderboardData[0].avatar}</div>
+                <div className="text-7xl">{top3[0].avatar}</div>
               </div>
-              {/* Text Area */}
               <div className="mb-6 text-center">
                 <div className="text-3xl font-black text-yellow-300 truncate w-40 text-center mx-auto drop-shadow-sm">
-                  {leaderboardData[0].nickname}
+                  {top3[0].nickname}
                 </div>
                 <div className="text-yellow-100 font-mono text-xl font-bold">
-                  {leaderboardData[0].totalScore} pts
+                  {top3[0].totalScore} pts
                 </div>
               </div>
               <div className="w-full h-80 bg-gradient-to-t from-yellow-600 to-yellow-500 rounded-t-2xl flex items-start justify-center pt-6 relative shadow-[0_10px_50px_rgba(250,204,21,0.3)] border-t-4 border-yellow-300">
@@ -802,21 +833,19 @@ export default function TeacherPage() {
             </div>
           )}
           {/* 3rd Place */}
-          {leaderboardData[2] && (
+          {top3[2] && (
             <div className="w-1/3 flex flex-col items-center animate-in slide-in-from-bottom duration-1000 delay-500 z-10">
-              {/* Avatar Bubble */}
               <div className="mb-4 p-3 bg-amber-800 rounded-full border-4 border-amber-700 shadow-lg">
                 <div className="text-5xl animate-pulse-slow">
-                  {leaderboardData[2].avatar}
+                  {top3[2].avatar}
                 </div>
               </div>
-              {/* Text Area */}
               <div className="mb-6 text-center">
                 <div className="text-xl font-bold truncate w-32 text-center mx-auto">
-                  {leaderboardData[2].nickname}
+                  {top3[2].nickname}
                 </div>
                 <div className="text-slate-400 font-mono font-bold text-sm">
-                  {leaderboardData[2].totalScore} pts
+                  {top3[2].totalScore} pts
                 </div>
               </div>
               <div className="w-full h-48 bg-gradient-to-t from-amber-800 to-amber-700 rounded-t-2xl flex items-start justify-center pt-4 relative shadow-2xl border-t-4 border-amber-600">
@@ -836,6 +865,7 @@ export default function TeacherPage() {
         </button>
       </div>
     );
+  }
 
   return <div>Loading...</div>;
 }
