@@ -123,32 +123,45 @@ export default function TeacherPage() {
     return uniqueNames.size;
   }, [rawScores, currentLevelIndex, currentLevelConfig]);
 
+  // --- FIX: 增强版 Leaderboard 数据结构 ---
   const leaderboardData = useMemo(() => {
+    // 1. 数据结构：增加 roundScores 来存每一轮的分数
     const totals: Record<
       string,
-      { nickname: string; avatar: string; totalScore: number }
+      {
+        nickname: string;
+        avatar: string;
+        totalScore: number;
+        roundScores: Record<number, number>; // Key: roundIndex, Value: Score
+      }
     > = {};
+
+    // 2. 初始化玩家
     players.forEach((p) => {
       totals[p.nickname] = {
         nickname: p.nickname,
         avatar: p.avatar,
         totalScore: 0,
+        roundScores: {},
       };
     });
 
-    // Deduplication logic
+    // 3. 去重逻辑 (Key: "nickname_roundIndex")
     const uniqueScores: Record<string, number> = {};
     rawScores.forEach((s) => {
       const key = `${s.nickname}_${s.roundIndex}`;
       uniqueScores[key] = s.score;
     });
 
+    // 4. 填充数据
     Object.entries(uniqueScores).forEach(([key, score]) => {
-      const parts = key.split("_");
-      const nickname = parts.slice(0, -1).join("_");
+      const lastUnderscoreIndex = key.lastIndexOf("_");
+      const nickname = key.substring(0, lastUnderscoreIndex);
+      const roundIdx = parseInt(key.substring(lastUnderscoreIndex + 1), 10);
 
       if (totals[nickname]) {
         totals[nickname].totalScore += score;
+        totals[nickname].roundScores[roundIdx] = score; // 记录单轮分数
       }
     });
 
@@ -718,22 +731,32 @@ export default function TeacherPage() {
           After Round {currentLevelIndex + 1}
         </p>
 
-        <div className="w-full max-w-3xl bg-slate-800 rounded-3xl p-8 mb-8 flex-1 overflow-y-auto custom-scrollbar border border-slate-700 shadow-2xl">
+        <div className="w-full max-w-6xl bg-slate-800 rounded-3xl p-8 mb-8 flex-1 overflow-y-auto custom-scrollbar border border-slate-700 shadow-2xl">
+          {/* FIX: 动态表格，包含每一轮的分数 */}
           <table className="w-full">
             <thead className="text-left text-slate-500 uppercase text-xs font-bold border-b border-slate-700">
               <tr>
-                <th className="pb-4 pl-4">Rank</th>
-                <th>Player</th>
-                <th className="text-right pr-4">Total Score</th>
+                <th className="pb-4 pl-4 w-20">Rank</th>
+                <th className="pb-4">Player</th>
+                {/* 动态生成 R1, R2, R3... 列 */}
+                {playlist.map((_, idx) => (
+                  <th
+                    key={idx}
+                    className="pb-4 text-right pr-4 text-indigo-400"
+                  >
+                    R{idx + 1}
+                  </th>
+                ))}
+                <th className="pb-4 text-right pr-4 text-yellow-400">Sum</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700/50">
               {leaderboardData.map((d, i) => (
                 <tr
                   key={i}
-                  className="text-2xl group hover:bg-white/5 transition-colors"
+                  className="text-xl group hover:bg-white/5 transition-colors"
                 >
-                  <td className="py-4 pl-4 font-bold text-slate-500 w-20">
+                  <td className="py-4 pl-4 font-bold text-slate-500">
                     {i === 0
                       ? "🥇"
                       : i === 1
@@ -743,9 +766,20 @@ export default function TeacherPage() {
                       : `#${i + 1}`}
                   </td>
                   <td className="py-4 font-bold flex items-center gap-3 text-white">
-                    <span className="text-3xl">{d.avatar}</span> {d.nickname}
+                    <span className="text-2xl">{d.avatar}</span> {d.nickname}
                   </td>
-                  <td className="py-4 pr-4 font-black text-right text-green-400">
+                  {/* 填充每一轮的分数，如果没有则显示 - */}
+                  {playlist.map((_, idx) => (
+                    <td
+                      key={idx}
+                      className="py-4 pr-4 font-mono text-right text-slate-300"
+                    >
+                      {d.roundScores[idx] !== undefined
+                        ? d.roundScores[idx]
+                        : "-"}
+                    </td>
+                  ))}
+                  <td className="py-4 pr-4 font-black text-right text-yellow-400 text-2xl">
                     {d.totalScore}
                   </td>
                 </tr>

@@ -11,10 +11,10 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
-// FIX: 引入 Modifier 类型
+// FIX: 引入 pointerWithin 替代 closestCenter
 import {
   DndContext,
-  closestCenter,
+  pointerWithin,
   DragEndEvent,
   DragOverEvent,
   TouchSensor,
@@ -22,7 +22,6 @@ import {
   useSensor,
   useSensors,
   DragOverlay,
-  defaultDropAnimationSideEffects,
   useDroppable,
   DragStartEvent,
   Modifier,
@@ -32,6 +31,9 @@ import {
   SortableContext,
   rectSortingStrategy,
 } from "@dnd-kit/sortable";
+// 核心：保留 snapCenterToCursor 以确保卡片跟随鼠标
+import { snapCenterToCursor } from "@dnd-kit/modifiers";
+
 import { SortableItem, ItemCard } from "@/components/SortableItem";
 import {
   Clock,
@@ -62,40 +64,7 @@ import {
 type Step = { id: string; content: string };
 type LevelData = { id?: string; title: string; correctOrder: Step[] };
 
-// --- 0. 内置修饰符 (解决无需安装包的问题) ---
-// 这个函数强制让拖拽物体的中心点对齐鼠标光标
-const snapCenterToCursor: Modifier = ({
-  transform,
-  activatorEvent,
-  draggingNodeRect,
-}) => {
-  if (draggingNodeRect && activatorEvent) {
-    const activationCoordinates = {
-      x:
-        "clientX" in activatorEvent
-          ? (activatorEvent as MouseEvent).clientX
-          : 0,
-      y:
-        "clientY" in activatorEvent
-          ? (activatorEvent as MouseEvent).clientY
-          : 0,
-    };
-
-    if (!activationCoordinates.x && !activationCoordinates.y) return transform;
-
-    const offsetX = activationCoordinates.x - draggingNodeRect.left;
-    const offsetY = activationCoordinates.y - draggingNodeRect.top;
-
-    return {
-      ...transform,
-      x: transform.x + offsetX - draggingNodeRect.width / 2,
-      y: transform.y + offsetY - draggingNodeRect.height / 2,
-    };
-  }
-  return transform;
-};
-
-// --- 1. 占位符组件 ---
+// --- 0. 占位符组件 ---
 const SlotPlaceholder = ({
   index,
   arrowDir,
@@ -113,10 +82,11 @@ const SlotPlaceholder = ({
         className={`w-full min-h-[70px] rounded-[2rem] border-2 border-dashed flex flex-col justify-center items-center text-center p-3 transition-colors z-10
                             ${
                               isOver
-                                ? "border-yellow-400 bg-yellow-400/10"
+                                ? "border-yellow-400 bg-yellow-400/10 scale-105 shadow-[0_0_15px_rgba(250,204,21,0.5)]"
                                 : "border-slate-500/40 bg-slate-800/30"
                             }
-                            text-white/30 text-xs font-bold`}
+                            /* 增加 hover 效果提示 */
+                            text-white/30 text-xs font-bold duration-200`}
       >
         {children || `Step ${index + 1}`}
       </div>
@@ -150,7 +120,7 @@ const SlotPlaceholder = ({
   );
 };
 
-// --- 2. Timer ---
+// --- 1. Timer ---
 const TimerDisplay = memo(
   ({
     endTimeMillis,
@@ -197,7 +167,7 @@ const TimerDisplay = memo(
 );
 TimerDisplay.displayName = "TimerDisplay";
 
-// --- 3. ActiveGame ---
+// --- 2. ActiveGame ---
 function ActiveGame({
   levelId,
   levelData,
@@ -242,61 +212,70 @@ function ActiveGame({
     }
   }, [levelData]);
 
-  const handleSubmit = useCallback(async () => {
-    setHasSubmitted((prev) => {
-      if (prev) return true;
-      const subKey = `sub_${sessionId}_round_${roundIndex}`;
-      if (sessionStorage.getItem(subKey)) return true;
-      sessionStorage.setItem(subKey, "true");
-      return true;
-    });
-    const currentAnswers = answerSlotsRef.current;
-    if (!currentAnswers.length || currentAnswers.some((s) => s === null)) {
-      alert("Please fill all slots before submitting.");
-      setHasSubmitted(false);
-      return;
-    }
-    let correctCount = 0;
-    levelData.correctOrder.forEach((correctStep, index) => {
-      const userStep = currentAnswers[index];
-      if (userStep && userStep.id === correctStep.id) correctCount++;
-    });
-    const isTimeUp = Date.now() > endTimeMillis;
-    const timeTaken = isTimeUp
-      ? 0
-      : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
-    const isPerfect = correctCount === levelData.correctOrder.length;
-    const timeBonus = isPerfect ? timeTaken * 10 : 0;
-    const finalScore = correctCount * 100 + timeBonus;
-    setLocalScore(finalScore);
-    try {
-      await addDoc(collection(db, "scores"), {
-        sessionId,
-        nickname,
-        avatar,
-        levelId,
-        roundIndex,
-        score: finalScore,
-        correctCount,
-        timeTaken,
-        timestamp: serverTimestamp(),
+  const handleSubmit = useCallback(
+    async (isForced = false) => {
+      setHasSubmitted((prev) => {
+        if (prev) return true;
+        return prev;
       });
-    } catch (e) {
-      console.error(e);
-    }
-  }, [
-    levelData,
-    levelId,
-    endTimeMillis,
-    sessionId,
-    nickname,
-    avatar,
-    roundIndex,
-  ]);
+
+      const currentAnswers = answerSlotsRef.current;
+
+      if (!isForced) {
+        if (!currentAnswers.length || currentAnswers.some((s) => s === null)) {
+          alert("Please fill all slots before submitting.");
+          return;
+        }
+      }
+
+      setHasSubmitted(true);
+      const subKey = `sub_${sessionId}_round_${roundIndex}`;
+      if (sessionStorage.getItem(subKey)) return;
+      sessionStorage.setItem(subKey, "true");
+
+      let correctCount = 0;
+      levelData.correctOrder.forEach((correctStep, index) => {
+        const userStep = currentAnswers[index];
+        if (userStep && userStep.id === correctStep.id) correctCount++;
+      });
+
+      const isTimeUp = Date.now() > endTimeMillis;
+      const timeTaken = isTimeUp
+        ? 0
+        : Math.max(0, Math.ceil((endTimeMillis - Date.now()) / 1000));
+
+      const isPerfect =
+        correctCount === levelData.correctOrder.length &&
+        currentAnswers.every((s) => s !== null);
+      const timeBonus = isPerfect ? timeTaken * 10 : 0;
+      const finalScore = correctCount * 100 + timeBonus;
+
+      setLocalScore(finalScore);
+
+      try {
+        await addDoc(collection(db, "scores"), {
+          sessionId,
+          nickname,
+          avatar,
+          levelId,
+          roundIndex,
+          score: finalScore,
+          correctCount,
+          timeTaken,
+          timestamp: serverTimestamp(),
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    [levelData, levelId, endTimeMillis, sessionId, nickname, avatar, roundIndex]
+  );
 
   useEffect(() => {
-    if (isReviewMode && !hasSubmitted && isFull) handleSubmit();
-  }, [isReviewMode, hasSubmitted, handleSubmit, isFull]);
+    if (isReviewMode && !hasSubmitted) {
+      handleSubmit(true);
+    }
+  }, [isReviewMode, hasSubmitted, handleSubmit]);
 
   // DnD Logic
   const sensors = useSensors(
@@ -392,10 +371,9 @@ function ActiveGame({
   const isLockedUI = isLocked;
   const activeItemData = activeId ? getItemById(activeId) : null;
 
-  // --- U-Shape Layout Calculation ---
+  // --- U-Shape Layout ---
   const totalSlots = levelData?.correctOrder.length || 0;
   const midPoint = Math.ceil(totalSlots / 2);
-
   const leftIndices = Array.from({ length: midPoint }, (_, i) => i);
   const rightIndices = Array.from(
     { length: totalSlots - midPoint },
@@ -469,7 +447,7 @@ function ActiveGame({
           <Clock size={18} />
           <TimerDisplay
             endTimeMillis={endTimeMillis}
-            onTimeUp={handleSubmit}
+            onTimeUp={() => handleSubmit(true)}
             isStopped={isReviewMode}
           />
         </div>
@@ -501,9 +479,10 @@ function ActiveGame({
         )}
       </div>
 
+      {/* FIX: 使用 pointerWithin 碰撞检测算法，实现“指哪打哪” */}
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={pointerWithin}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
@@ -540,26 +519,23 @@ function ActiveGame({
           </div>
         </div>
 
-        {/* Answer Area (Split Columns for U-Shape) */}
+        {/* Answer Area */}
         <div className="flex-1 px-4 pb-32 overflow-y-auto min-h-0 custom-scrollbar relative">
           <div
             className="bg-white/10 rounded-xl p-4 min-h-full border-2 border-dashed border-white/30 relative"
             id="answer-container"
           >
             <div className="text-[10px] font-bold text-indigo-200 uppercase mb-4 tracking-wider flex justify-between">
-              <span>Your Order</span>
+              <span>Your Order (U-Shape)</span>
               <span>
                 {answerSlots.filter((s) => s !== null).length} / {totalSlots}
               </span>
             </div>
 
             <div className="flex justify-between gap-12 h-full">
-              {/* 左列 */}
               <div className="flex-1 flex flex-col gap-16">
                 {leftIndices.map((idx) => renderSlot(idx, "left"))}
               </div>
-
-              {/* 右列 */}
               <div className="flex-1 flex flex-col gap-16 justify-end">
                 {rightIndices.map((idx) => renderSlot(idx, "right"))}
               </div>
@@ -567,7 +543,6 @@ function ActiveGame({
           </div>
         </div>
 
-        {/* FIX: 使用 snapCenterToCursor 修饰符，同时移除 dropAnimation */}
         {mounted &&
           createPortal(
             <DragOverlay modifiers={[snapCenterToCursor]} zIndex={1000}>
@@ -593,8 +568,7 @@ function ActiveGame({
       <div className="fixed bottom-0 w-full bg-white p-4 rounded-t-2xl shadow-2xl flex flex-col items-center z-50">
         {!hasSubmitted && !isReviewMode ? (
           <button
-            onClick={handleSubmit}
-            disabled={!isFull}
+            onClick={() => handleSubmit(false)}
             className={`w-full max-w-md text-white font-black py-4 rounded-xl text-xl shadow-lg transition-all 
                         ${
                           isFull
