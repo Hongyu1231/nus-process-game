@@ -11,7 +11,9 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
-// FIX: 引入 pointerWithin 替代 closestCenter
+
+// FIX: 1. 确保导入 Modifier 类型
+// FIX: 2. 移除 @dnd-kit/modifiers 的导入，避免与下方本地定义冲突
 import {
   DndContext,
   pointerWithin,
@@ -31,8 +33,6 @@ import {
   SortableContext,
   rectSortingStrategy,
 } from "@dnd-kit/sortable";
-// 核心：保留 snapCenterToCursor 以确保卡片跟随鼠标
-import { snapCenterToCursor } from "@dnd-kit/modifiers";
 
 import { SortableItem, ItemCard } from "@/components/SortableItem";
 import {
@@ -64,7 +64,40 @@ import {
 type Step = { id: string; content: string };
 type LevelData = { id?: string; title: string; correctOrder: Step[] };
 
-// --- 0. 占位符组件 ---
+// --- 0. 内置修饰符 (解决无需安装包的问题) ---
+// 这个函数强制让拖拽物体的中心点对齐鼠标光标
+const snapCenterToCursor: Modifier = ({
+  transform,
+  activatorEvent,
+  draggingNodeRect,
+}) => {
+  if (draggingNodeRect && activatorEvent) {
+    const activationCoordinates = {
+      x:
+        "clientX" in activatorEvent
+          ? (activatorEvent as MouseEvent).clientX
+          : 0,
+      y:
+        "clientY" in activatorEvent
+          ? (activatorEvent as MouseEvent).clientY
+          : 0,
+    };
+
+    if (!activationCoordinates.x && !activationCoordinates.y) return transform;
+
+    const offsetX = activationCoordinates.x - draggingNodeRect.left;
+    const offsetY = activationCoordinates.y - draggingNodeRect.top;
+
+    return {
+      ...transform,
+      x: transform.x + offsetX - draggingNodeRect.width / 2,
+      y: transform.y + offsetY - draggingNodeRect.height / 2,
+    };
+  }
+  return transform;
+};
+
+// --- 1. 占位符组件 (视觉清理版) ---
 const SlotPlaceholder = ({
   index,
   arrowDir,
@@ -79,14 +112,14 @@ const SlotPlaceholder = ({
     <div className="relative flex flex-col items-center w-full">
       <div
         ref={setNodeRef}
-        className={`w-full min-h-[70px] rounded-[2rem] border-2 border-dashed flex flex-col justify-center items-center text-center p-3 transition-colors z-10
+        // 透明背景，仅在悬停时显示高亮
+        className={`w-full min-h-[70px] rounded-[2rem] flex flex-col justify-center items-center text-center p-3 transition-all duration-200 z-10
                             ${
                               isOver
-                                ? "border-yellow-400 bg-yellow-400/10 scale-105 shadow-[0_0_15px_rgba(250,204,21,0.5)]"
-                                : "border-slate-500/40 bg-slate-800/30"
-                            }
-                            /* 增加 hover 效果提示 */
-                            text-white/30 text-xs font-bold duration-200`}
+                                ? "bg-yellow-400/20 ring-2 ring-yellow-400 scale-105"
+                                : "bg-white/5"
+                            } 
+                            text-white/20 text-xs font-bold`}
       >
         {children || `Step ${index + 1}`}
       </div>
@@ -96,31 +129,31 @@ const SlotPlaceholder = ({
           className={`absolute pointer-events-none text-white/50 drop-shadow-[0_1px_2px_rgba(0,0,0,0.3)] z-0
                     ${
                       arrowDir === "right"
-                        ? "-right-10 top-1/2 -translate-y-1/2"
+                        ? "-right-14 top-1/2 -translate-y-1/2"
                         : ""
                     } 
                     ${
                       arrowDir === "down"
-                        ? "-bottom-10 left-1/2 -translate-x-1/2"
+                        ? "-bottom-14 left-1/2 -translate-x-1/2"
                         : ""
                     }
                     ${
                       arrowDir === "up"
-                        ? "-top-10 left-1/2 -translate-x-1/2"
+                        ? "-top-14 left-1/2 -translate-x-1/2"
                         : ""
                     }
                 `}
         >
-          {arrowDir === "right" && <ArrowRight size={48} strokeWidth={3} />}
-          {arrowDir === "down" && <ArrowDown size={48} strokeWidth={3} />}
-          {arrowDir === "up" && <ArrowUp size={48} strokeWidth={3} />}
+          {arrowDir === "right" && <ArrowRight size={56} strokeWidth={3} />}
+          {arrowDir === "down" && <ArrowDown size={56} strokeWidth={3} />}
+          {arrowDir === "up" && <ArrowUp size={56} strokeWidth={3} />}
         </div>
       )}
     </div>
   );
 };
 
-// --- 1. Timer ---
+// --- 2. Timer ---
 const TimerDisplay = memo(
   ({
     endTimeMillis,
@@ -167,7 +200,7 @@ const TimerDisplay = memo(
 );
 TimerDisplay.displayName = "TimerDisplay";
 
-// --- 2. ActiveGame ---
+// --- 3. ActiveGame ---
 function ActiveGame({
   levelId,
   levelData,
@@ -300,6 +333,7 @@ function ActiveGame({
     const { active, over } = event;
     setActiveId(null);
     if (!over) return;
+
     const activeIdStr = active.id as string;
     const overIdStr = over.id as string;
     const activeItem = getItemById(activeIdStr);
@@ -316,6 +350,7 @@ function ActiveGame({
 
     if (!activeItem || !sourceContainer || !targetContainer) return;
 
+    // 1. Slot <-> Slot (交换)
     if (sourceContainer === "answer" && targetContainer === "answer") {
       let activeIndex = answerSlots.findIndex((s) => s?.id === activeIdStr);
       let overIndex = -1;
@@ -325,20 +360,29 @@ function ActiveGame({
 
       if (activeIndex !== -1 && overIndex !== -1 && activeIndex !== overIndex) {
         const itemToReturn = answerSlots[overIndex];
-        if (isFull) {
-          if (answerSlots[activeIndex] && answerSlots[overIndex])
-            setAnswerSlots((slots) => arrayMove(slots, activeIndex, overIndex));
+
+        if (itemToReturn) {
+          // Swap
+          setAnswerSlots((slots) => {
+            const newSlots = [...slots];
+            const temp = newSlots[activeIndex];
+            newSlots[activeIndex] = newSlots[overIndex];
+            newSlots[overIndex] = temp;
+            return newSlots;
+          });
         } else {
-          if (!itemToReturn)
-            setAnswerSlots((slots) => {
-              const newSlots = [...slots];
-              newSlots[overIndex] = activeItem as Step;
-              newSlots[activeIndex] = null;
-              return newSlots;
-            });
+          // Move to empty
+          setAnswerSlots((slots) => {
+            const newSlots = [...slots];
+            newSlots[overIndex] = activeItem as Step;
+            newSlots[activeIndex] = null;
+            return newSlots;
+          });
         }
       }
-    } else if (sourceContainer === "bank" && targetContainer === "answer") {
+    }
+    // 2. Bank -> Slot
+    else if (sourceContainer === "bank" && targetContainer === "answer") {
       let targetIndex = -1;
       if (overIdStr.startsWith("slot-"))
         targetIndex = parseInt(overIdStr.replace("slot-", ""), 10);
@@ -347,6 +391,7 @@ function ActiveGame({
       if (targetIndex !== -1) {
         const itemToReturn = answerSlots[targetIndex];
         const newItem = activeItem as Step;
+
         setBankItems((items) => items.filter((i) => i.id !== activeIdStr));
         setAnswerSlots((slots) => {
           const newSlots = [...slots];
@@ -355,7 +400,9 @@ function ActiveGame({
         });
         if (itemToReturn) setBankItems((items) => [...items, itemToReturn]);
       }
-    } else if (sourceContainer === "answer" && targetContainer === "bank") {
+    }
+    // 3. Slot -> Bank
+    else if (sourceContainer === "answer" && targetContainer === "bank") {
       const activeIndex = answerSlots.findIndex((s) => s?.id === activeIdStr);
       if (activeIndex !== -1) {
         setAnswerSlots((slots) => {
@@ -479,7 +526,6 @@ function ActiveGame({
         )}
       </div>
 
-      {/* FIX: 使用 pointerWithin 碰撞检测算法，实现“指哪打哪” */}
       <DndContext
         sensors={sensors}
         collisionDetection={pointerWithin}
@@ -521,12 +567,13 @@ function ActiveGame({
 
         {/* Answer Area */}
         <div className="flex-1 px-4 pb-32 overflow-y-auto min-h-0 custom-scrollbar relative">
+          {/* FIX: 移除了 bg-white/10 和 border-dashed，只保留布局 */}
           <div
-            className="bg-white/10 rounded-xl p-4 min-h-full border-2 border-dashed border-white/30 relative"
+            className="rounded-xl min-h-full relative px-6 py-6"
             id="answer-container"
           >
             <div className="text-[10px] font-bold text-indigo-200 uppercase mb-4 tracking-wider flex justify-between">
-              <span>Your Order (U-Shape)</span>
+              <span>Your Order</span>
               <span>
                 {answerSlots.filter((s) => s !== null).length} / {totalSlots}
               </span>
@@ -564,42 +611,35 @@ function ActiveGame({
           )}
       </DndContext>
 
-      {/* Footer */}
-      <div className="fixed bottom-0 w-full bg-white p-4 rounded-t-2xl shadow-2xl flex flex-col items-center z-50">
-        {!hasSubmitted && !isReviewMode ? (
-          <button
-            onClick={() => handleSubmit(false)}
-            className={`w-full max-w-md text-white font-black py-4 rounded-xl text-xl shadow-lg transition-all 
-                        ${
-                          isFull
-                            ? "bg-green-500 hover:bg-green-600 active:scale-95"
-                            : "bg-slate-400 cursor-not-allowed"
-                        }`}
-          >
-            SUBMIT
-          </button>
-        ) : (
-          <div className="text-center w-full max-w-md">
-            {isReviewMode ? (
-              <div className="text-indigo-600 font-bold text-lg animate-pulse flex items-center justify-center gap-2">
-                <Eye /> Check the big screen!
-              </div>
-            ) : (
+      {!isReviewMode && (
+        <div className="fixed bottom-0 w-full bg-white p-4 rounded-t-2xl shadow-2xl flex flex-col items-center z-50">
+          {!hasSubmitted ? (
+            <button
+              onClick={() => handleSubmit(false)}
+              className={`w-full max-w-md text-white font-black py-4 rounded-xl text-xl shadow-lg transition-all 
+                            ${
+                              isFull
+                                ? "bg-green-500 hover:bg-green-600 active:scale-95"
+                                : "bg-slate-400 cursor-not-allowed"
+                            }`}
+            >
+              SUBMIT
+            </button>
+          ) : (
+            <div className="text-center w-full max-w-md">
               <div className="flex items-center justify-center gap-2 text-green-600 font-bold text-xl mb-2">
                 <CheckCircle /> Submitted!
               </div>
-            )}
-            {!isReviewMode && (
               <p className="text-slate-500 text-sm">Wait for results...</p>
-            )}
-          </div>
-        )}
-      </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-// --- 3. Main Container ---
+// --- 4. Main Container ---
 function GameContent() {
   const searchParams = useSearchParams();
   const nickname = searchParams.get("nickname") || "Anonymous";
@@ -677,7 +717,9 @@ function GameContent() {
       <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-6 text-center">
         <Loader2 size={60} className="animate-spin text-indigo-400 mb-6" />
         <h1 className="text-3xl font-black mb-2">You are in!</h1>
-        <p className="text-xl text-indigo-200 mb-8">Waiting for teacher...</p>
+        <p className="text-xl text-indigo-200 mb-8">
+          Waiting for instructor to start...
+        </p>
         <div className="bg-indigo-800 px-8 py-4 rounded-full font-bold text-2xl flex items-center gap-3">
           <span>{avatar}</span> {nickname}
         </div>
